@@ -1,0 +1,33 @@
+[Unit]
+Description=Prumo - painel financeiro Flask
+After=network.target
+
+[Service]
+Type=simple
+User=prumo
+Group=prumo
+WorkingDirectory=/opt/prumo
+EnvironmentFile=/etc/prumo/prumo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/prumo/.venv/bin/waitress-serve --host=127.0.0.1 --port=5000 --threads=4 app:app
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=prumo
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/prumo
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

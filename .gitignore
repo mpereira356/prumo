@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+instance/
+.env
+.pytest_cache/
+artifacts/
+data/initial.json
+Controle Financeiro - Investimentos e Recebiveis.html
+*.sqlite3
+*.sqlite3-*
+*.key
+backups/
