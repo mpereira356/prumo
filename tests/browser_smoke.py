@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from werkzeug.security import generate_password_hash
 from werkzeug.serving import make_server
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 from app import create_app
 
 def main():
@@ -58,9 +58,21 @@ def main():
                 assert dialog.locator('tbody tr').count()==8
                 assert '10/11/2026' in dialog.inner_text() and '10/06/2027' in dialog.inner_text()
                 assert '880,00' in dialog.inner_text()
+                dialog.locator('tbody tr').first.get_by_role('button',name='Pagamento confirmado',exact=True).click()
+                page.wait_for_url('**/recebiveis#schedule-9901')
+                dialog=page.get_by_role('dialog',name='Contrato de teste',exact=True)
+                assert dialog.is_visible() and dialog.locator('tbody tr').count()==8
+                assert dialog.locator('tbody tr').first.locator('.badge').inner_text()=='Pago'
+                page.once('dialog',lambda confirm:confirm.accept())
+                dialog.locator('tbody tr').first.get_by_role('button',name='Desfazer pagamento',exact=True).click()
+                page.wait_for_load_state('networkidle')
+                dialog=page.get_by_role('dialog',name='Contrato de teste',exact=True)
+                assert dialog.is_visible()
+                assert dialog.locator('tbody tr').first.locator('.badge').inner_text()!='Pago'
+                trigger=page.get_by_role('button',name='Ver cronograma de Contrato de teste',exact=True)
                 page.keyboard.press('Escape')
                 assert not dialog.is_visible()
-                assert trigger.evaluate('(el)=>el===document.activeElement')
+                expect(trigger).to_be_focused()
                 interest_card=page.locator('article.contract').filter(has=page.get_by_role('heading',name='Juros de teste',exact=True))
                 interest_card.get_by_role('button',name='Histórico',exact=True).click()
                 history=page.get_by_role('dialog',name='Histórico · Juros de teste',exact=True)

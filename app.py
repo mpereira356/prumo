@@ -700,6 +700,7 @@ def create_app(test_config=None):
         row=next((r for r in data['rows'] if r['key']==key),None)
         if not row:
             abort(404)
+        destination=url_for('receivables')+f"#schedule-{row['contract']}" if request.form.get('source')=='schedule' else url_for('cashflow')
         if request.form.get('undo')=='1':
             e=next(e for e in data['contracts'] if e['id']==row['contract'])
             if any(p.get('payment_key')==key or (not p.get('payment_key') and Decimal(p.get('juros','0'))>0 and f"{p['data'][:7]}-{e['id']}"==key) for p in e.get('pagamentosExtras',[])):
@@ -709,14 +710,11 @@ def create_app(test_config=None):
             db().execute('DELETE FROM payments WHERE key=?',(key,))
             audit('payment_reversed')
         else:
-            if row['due']>today().isoformat():
-                flash('Confirme o recebimento na data de vencimento ou após ela.','error')
-                return redirect(url_for('cashflow'))
             db().execute('INSERT INTO payments VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET amount=excluded.amount,paid_at=excluded.paid_at',(key,str(row['amount']),today().isoformat()))
             audit('payment_confirmed')
         db().commit()
         flash('Recebimento atualizado.','success')
-        return redirect(url_for('cashflow'))
+        return redirect(destination)
 
     @app.route('/metas',methods=['GET','POST'])
     @protected

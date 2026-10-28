@@ -360,6 +360,23 @@ class FinanceTests(unittest.TestCase):
         restored=self.client.get('/exportar/json').json
         self.assertEqual(restored['emprestimos'][0]['situacaoCheques'],{'2027-01-80-c0':'EM_ATRASO'})
 
+    def test_schedule_confirmations_for_all_non_cheque_types(self):
+        self.login()
+        token=self.csrf('/recebiveis')
+        for index,kind in enumerate(['PARCELADO','JUROS_COM_AMORTIZACAO','JUROS_MENSAIS','UNICO'],100):
+            e=dict(id=index,tomador='Parcela de teste',tipo=kind,status='ATIVO',risco='baixo',principal='1000',taxa='2',valorMensal='20',parcelas=1,inicio='2090-01-15',fim='2090-01-15')
+            with closing(sqlite3.connect(self.database)) as conn, conn:
+                conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(index,json.dumps(e)))
+            data=dict(csrf_token=token,key=f'2090-01-{index}',source='schedule')
+            for _ in range(2):
+                response=self.client.post('/pagamento',data=data)
+                self.assertTrue(response.location.endswith(f'#schedule-{index}'))
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados'][data['key']],'20.00')
+            self.assertEqual(len(schedule([next(c for c in backup['emprestimos'] if c['id']==index)])),1)
+            self.client.post('/pagamento',data=dict(data,undo='1'))
+            self.assertNotIn(data['key'],self.client.get('/exportar/json').json['recebimentosConfirmados'])
+
 
 if __name__=='__main__':
     unittest.main()

@@ -45,6 +45,10 @@ document.querySelectorAll('[data-schedule-dialog]').forEach(button => {
 });
 document.querySelectorAll('.schedule-dialog').forEach(dialog => {
   dialog.querySelector('[data-dialog-close]').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => {
+    const opener = [...document.querySelectorAll('[data-schedule-dialog]')].find(button => button.dataset.scheduleDialog === dialog.id);
+    opener?.focus({preventScroll:true});
+  });
   dialog.addEventListener('click', event => {
     const rect = dialog.getBoundingClientRect();
     if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
