@@ -60,7 +60,7 @@ Todos os usuários criados pelo CLI acessam a mesma carteira pessoal. Não há i
 
 ## Carteira, investimentos e extrato
 
-**Carteira** é dinheiro disponível, separado do patrimônio aplicado em **Meus investimentos**. O card aparece na Visão geral e nos investimentos. O botão **Adicionar saldo** pede o valor e a origem e gera uma entrada no **Extrato**. Como combinado para a migração, a Carteira começa em **R$ 0**: pagamentos confirmados antes da ativação não são creditados novamente. Informe manualmente o saldo inicial realmente disponível. Essa migração é executada uma única vez, sem apagar posições ou recebíveis.
+**Carteira** é dinheiro disponível, separado do patrimônio aplicado em **Meus investimentos**. O saldo aparece em um quadro destacado ao lado do dólar, no cabeçalho fixo de todas as páginas autenticadas. Clicar no valor abre o Extrato; o botão **+** pede o valor e a origem e gera uma entrada no **Extrato**. Como combinado para a migração, a Carteira começa em **R$ 0**: pagamentos confirmados antes da ativação não são creditados novamente. Informe manualmente o saldo inicial realmente disponível. Essa migração é executada uma única vez, sem apagar posições ou recebíveis.
 
 Novos recebimentos confirmados entram automaticamente, incluindo cheques, juros, multa, mora e principal amortizado. Confirmações repetidas não duplicam o crédito. Estornos, mudanças de cheque pago para não pago e exclusões de contratos revertem o valor correspondente. Se esse dinheiro já tiver sido investido e faltar saldo para o estorno, a operação é bloqueada: resgate investimentos ou adicione saldo antes de desfazer o recebimento.
 

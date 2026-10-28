@@ -266,7 +266,7 @@ def create_app(test_config=None):
 
     @app.context_processor
     def context():
-        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat(),undo_notice=undo_notice())
+        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat(),undo_notice=undo_notice(),header_wallet_balance=Decimal(wallet.balance(db()))/100 if g.get('user') else Decimal(0))
 
     @app.post('/desfazer')
     @protected
