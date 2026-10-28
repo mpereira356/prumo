@@ -86,7 +86,7 @@ def schedule(contracts):
                 if e['tipo'] == 'JUROS_COM_AMORTIZACAO':
                     balance = Decimal(str(e.get('principalAtual', e['principal'])))
                     # Reconstitui o saldo anterior para preservar juros históricos.
-                    balance += sum((Decimal(str(p['valor'])) for p in e.get('pagamentosExtras', []) if p['data'] > due.isoformat()), Decimal(0))
+                    balance += sum((Decimal(str(p['valor'])) for p in e.get('pagamentosExtras', []) if p['data'] >= due.isoformat()), Decimal(0))
                     value = money(balance * Decimal(str(e['taxa'])) / 100)
                 if i == 0 and e.get('primeiraParcela'):
                     value = money(e['primeiraParcela'])
@@ -307,7 +307,12 @@ def create_app(test_config=None):
 
     def records(table):
         assert table in ('assets','contracts')
-        return [dict(json.loads(r['payload']),id=r['id']) for r in db().execute(f'SELECT * FROM {table} ORDER BY id')]
+        result=[dict(json.loads(r['payload']),id=r['id']) for r in db().execute(f'SELECT * FROM {table} ORDER BY id')]
+        if table=='contracts':
+            from validation import normalize_extra
+            for e in result:
+                e['pagamentosExtras']=[normalize_extra(p) for p in e.get('pagamentosExtras',[])]
+        return result
 
     def financial():
         assets, contracts = records('assets'), records('contracts')
@@ -315,13 +320,29 @@ def create_app(test_config=None):
             a['market_value']=str(money(Decimal(str(a['qtd']))*Decimal(str(a['atual']))))
         rows=schedule(contracts)
         payments={r['key']:money(r['amount']) for r in db().execute('SELECT * FROM payments')}
+        legacy_interest={}
+        legacy_expected={}
+        unscheduled_interest=Decimal(0)
+        keys={r['key'] for r in rows}
+        for e in contracts:
+            for p in e.get('pagamentosExtras',[]):
+                key=p.get('payment_key') or f"{p['data'][:7]}-{e['id']}"
+                if p.get('juros') and not p.get('payment_key') and key in keys:
+                    legacy_interest[key]=legacy_interest.get(key,Decimal(0))+money(p['juros'])
+                    if p.get('principalAntes') is not None:
+                        legacy_expected[key]=max(legacy_expected.get(key,Decimal(0)),money(Decimal(p['principalAntes'])*Decimal(str(e.get('taxa',0)))/100))
+                elif p.get('juros') and not p.get('payment_key') and key not in keys:
+                    unscheduled_interest+=money(p['juros'])
+        for key,value in legacy_interest.items():
+            payments[key]=max(payments.get(key,Decimal(0)),value)
         active_ids={e['id'] for e in contracts if e['status']=='ATIVO'}
         rows=[r for r in rows if r['contract'] in active_ids or r['key'] in payments]
         for r in rows:
             r['paid']=payments.get(r['key'],Decimal(0))
             if r['paid']:
-                r['amount']=r['paid']
-            r['overdue']=r['due']<today().isoformat() and not r['paid']
+                r['amount']=max(r['paid'],legacy_expected.get(r['key'],r['paid']))
+            r['settled']=r['paid']>=r['amount']
+            r['overdue']=r['due']<today().isoformat() and not r['settled']
         invested=sum((money(Decimal(str(a['qtd']))*Decimal(str(a['atual']))) for a in assets),Decimal(0))
         cost=sum((money(Decimal(str(a['qtd']))*Decimal(str(a['pm']))) for a in assets),Decimal(0))
         pending=sum((r['amount']-r['paid'] for r in rows),Decimal(0))
@@ -331,7 +352,7 @@ def create_app(test_config=None):
         amortized=sum((money(p['valor']) for e in contracts for p in e.get('pagamentosExtras',[])),Decimal(0))
         return dict(assets=assets, contracts=contracts, rows=rows, invested=invested,cost=cost, gain=invested-cost,
             pending=pending, principal=principal, allocation=allocation, settings=settings,
-            total=invested+pending+principal, paid=sum(payments.values(),Decimal(0))+amortized,
+            total=invested+pending+principal, paid=sum(payments.values(),Decimal(0))+amortized+unscheduled_interest,
             contributions=[dict(r) for r in db().execute('SELECT * FROM contributions ORDER BY day DESC,id DESC')])
 
     @app.get('/')
@@ -423,18 +444,51 @@ def create_app(test_config=None):
     @app.get('/recebiveis')
     @protected
     def receivables():
-        return render_template('receivables.html',page='receivables',title='Recebíveis',**financial())
+        data=financial()
+        status=request.args.get('status','todos')
+        if status not in ('todos','ATIVO','QUITADO'):
+            status='todos'
+        for e in data['contracts']:
+            contract_rows=[r for r in data['rows'] if r['contract']==e['id']]
+            e['next_payment']=next((r for r in contract_rows if not r['settled'] and r['due']>=today().isoformat()),None)
+            e['schedule_total']=sum((r['amount'] for r in contract_rows),Decimal(0))
+            e['monthly_interest']=money(Decimal(str(e.get('principalAtual',e.get('principal',0))))*Decimal(str(e.get('taxa',0)))/100) if e['tipo']=='JUROS_COM_AMORTIZACAO' else money(e.get('valorMensal',0))
+        data['contracts']=[e for e in data['contracts'] if status=='todos' or e['status']==status]
+        return render_template('receivables.html',page='receivables',title='Recebíveis',status=status,**data)
 
     @app.route('/contrato/novo',methods=['GET','POST'])
+    @app.route('/contrato/<int:contract_id>/editar',methods=['GET','POST'])
     @protected
-    def contract_form():
+    def contract_form(contract_id=None):
+        original=next((e for e in records('contracts') if e['id']==contract_id),None)
+        if contract_id and not original:
+            abort(404)
         if request.method=='POST':
             try:
-                e={k:text(request.form.get(k,''),150) for k in ('tomador','tipo','inicio')}
+                db().execute('BEGIN IMMEDIATE')
+                if contract_id:
+                    original=next(e for e in records('contracts') if e['id']==contract_id)
+                e=dict(original or {})
+                e.update({k:text(request.form.get(k,''),150) for k in ('tomador','tipo','inicio')})
                 if e['tipo'] not in TYPES:
                     raise ValueError('Tipo inválido.')
                 start=date.fromisoformat(e['inicio'])
-                e.update(principal=str(number(request.form.get('principal'))),valorMensal=str(number(request.form.get('valorMensal'))),taxa=str(number(request.form.get('taxa','0'),0,100)),status='ATIVO',risco=request.form.get('risco','medio'),obs=request.form.get('obs','')[:1000])
+                e.update(principal=str(money(number(request.form.get('principal')))),valorMensal=str(money(number(request.form.get('valorMensal')))),taxa=str(number(request.form.get('taxa','0'),0,100)),status=e.get('status','ATIVO'),risco=request.form.get('risco','medio'),obs=request.form.get('obs','')[:1000])
+                e['apelido']=text(request.form.get('apelido') or e['tomador'])
+                if e['tipo']=='PARCELADO' and request.form.get('primeiraParcela'):
+                    e['primeiraParcela']=str(money(number(request.form['primeiraParcela'],Decimal('.01'))))
+                else:
+                    e.pop('primeiraParcela',None)
+                if e['tipo'] in ('JUROS_COM_AMORTIZACAO','JUROS_MENSAIS'):
+                    e['principalAtual']=str(money(number(request.form.get('principalAtual') or e['principal'],0,Decimal(e['principal']))))
+                else:
+                    e.pop('principalAtual',None)
+                if e['tipo']!='CHEQUES':
+                    e.pop('cheques',None)
+                if request.form.get('amortizacaoInicio'):
+                    e['amortizacaoInicio']=date.fromisoformat(request.form['amortizacaoInicio']).isoformat()
+                else:
+                    e.pop('amortizacaoInicio',None)
                 e['parcelas']=int(request.form.get('parcelas','1'))
                 if not 1<=e['parcelas']<=480 or e['risco'] not in ('baixo','medio','alto'):
                     raise ValueError('Informe de 1 a 480 parcelas e um risco válido.')
@@ -450,21 +504,126 @@ def create_app(test_config=None):
                         e['cheques'].append({'data':due,'valor':str(number(value,Decimal('.01')))})
                     if not 1<=len(e['cheques'])<=100:
                         raise ValueError('Informe de 1 a 100 cheques.')
+                    e['principal']=str(sum((Decimal(c['valor']) for c in e['cheques']),Decimal(0)))
                 elif e['tipo']!='JUROS_COM_AMORTIZACAO' and number(e['valorMensal'])<=0:
                     raise ValueError('A parcela deve ser maior que zero.')
                 elif e['tipo']=='JUROS_COM_AMORTIZACAO' and (number(e['principal'])<=0 or number(e['taxa'])<=0):
                     raise ValueError('Informe principal e taxa maiores que zero.')
-                e['fim']=add_month(start,e['parcelas']-1).isoformat()
-                cur=db().execute('INSERT INTO contracts(payload) VALUES (?)',(json.dumps(e),))
-                e['id']=cur.lastrowid
+                e['fim']=date.fromisoformat(request.form['fim']).isoformat() if request.form.get('fim') else (None if e['tipo']=='CHEQUES' else add_month(start,e['parcelas']-1).isoformat())
+                if e['fim'] and e['fim']<e['inicio']:
+                    raise ValueError('A data final deve ser posterior ao início.')
+                if e['tipo']=='JUROS_MENSAIS' and e['fim'] and e['fim']>add_month(start,479).isoformat():
+                    raise ValueError('Cronograma limitado a 480 meses.')
+                if contract_id:
+                    confirmed_keys={p['key'] for p in db().execute('SELECT key FROM payments')}
+                    has_payments=bool(original.get('pagamentosExtras')) or any(r['key'] in confirmed_keys for r in schedule([original]))
+                    def terms(contract):
+                        numeric=tuple(Decimal(str(contract.get(k,0))) for k in ('principal','taxa','valorMensal','primeiraParcela'))
+                        return numeric,contract.get('principalAtual',contract.get('principal',0)),[(r['key'],r['due'],r['amount']) for r in schedule([contract])]
+                    # Compare saldo como número, não como string do formulário.
+                    def signature(contract):
+                        nums,balance,rows=terms(contract)
+                        return nums,Decimal(str(balance)),rows,contract['tipo']
+                    if has_payments and signature(original)!=signature(e):
+                        raise ValueError('Contrato com pagamentos: edite apenas nome, apelido, risco e observações para preservar o histórico.')
+                else:
+                    cur=db().execute('INSERT INTO contracts(payload) VALUES (?)',(json.dumps(e),))
+                    e['id']=cur.lastrowid
                 db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),e['id']))
-                audit('contract_created')
+                audit('contract_updated' if contract_id else 'contract_created')
                 db().commit()
-                flash('Contrato adicionado ao cronograma.','success')
+                flash('Contrato atualizado.' if contract_id else 'Contrato adicionado ao cronograma.','success')
                 return redirect(url_for('receivables'))
-            except (ValueError,TypeError,InvalidOperation):
-                flash('Verifique os campos. Use datas válidas e cheques no formato indicado.','error')
-        return render_template('contract_form.html',page='receivables',title='Novo contrato')
+            except (ValueError,TypeError,InvalidOperation) as err:
+                db().rollback()
+                flash(str(err) or 'Verifique os campos do contrato.','error')
+        values=dict(original or {})
+        values.setdefault('principalAtual',values.get('principal',''))
+        values['cheques']='\n'.join(f"{c['data']};{c['valor']}" for c in values.get('cheques',[]))
+        if request.method=='POST':
+            values.update(request.form)
+        return render_template('contract_form.html',page='receivables',title='Editar contrato' if contract_id else 'Novo contrato',values=values,editing=bool(contract_id))
+
+    @app.post('/contrato/<int:contract_id>/excluir')
+    @protected
+    def delete_contract(contract_id):
+        db().execute('BEGIN IMMEDIATE')
+        e=next((e for e in records('contracts') if e['id']==contract_id),None)
+        if not e:
+            abort(404)
+        if request.form.get('confirm')!=str(contract_id):
+            abort(400)
+        db().executemany('DELETE FROM payments WHERE key=?',[(r['key'],) for r in schedule([e])])
+        db().execute('DELETE FROM contracts WHERE id=?',(contract_id,))
+        audit('contract_deleted')
+        db().commit()
+        flash('Contrato e seus recebimentos excluídos.','success')
+        return redirect(url_for('receivables'))
+
+    @app.route('/contrato/<int:contract_id>/pagamento',methods=['GET','POST'])
+    @protected
+    def contract_payment(contract_id):
+        data=financial()
+        e=next((e for e in data['contracts'] if e['id']==contract_id),None)
+        if not e or e['tipo']!='JUROS_COM_AMORTIZACAO':
+            abort(404)
+        choices=[r for r in data['rows'] if r['contract']==contract_id and not r['settled'] and r['due']<=today().isoformat()]
+        if request.method=='POST':
+            try:
+                db().execute('BEGIN IMMEDIATE')
+                data=financial()
+                e=next(e for e in data['contracts'] if e['id']==contract_id)
+                row=next((r for r in data['rows'] if r['contract']==contract_id and r['key']==request.form.get('key') and not r['settled'] and r['due']<=today().isoformat()),None)
+                if not row:
+                    raise ValueError('Parcela já recebida ou inválida. Recarregue a página.')
+                paid_on=date.fromisoformat(request.form.get('paid_on',''))
+                if paid_on>today() or paid_on.isoformat()<row['due'] or any(p['data']>paid_on.isoformat() for p in e.get('pagamentosExtras',[])):
+                    raise ValueError('Informe uma data entre o vencimento e hoje, posterior aos pagamentos já registrados.')
+                principal=money(e.get('principalAtual',e['principal']))
+                interest=row['amount']-row['paid']
+                value=money(number(request.form.get('amount'),interest,interest+principal))
+                reduction=value-interest
+                if len(e.get('pagamentosExtras',[]))>=1000:
+                    raise ValueError('Limite de 1000 pagamentos por contrato atingido.')
+                e['principalAtual']=str(principal-reduction)
+                if principal==reduction and not any(r['contract']==contract_id and r['key']!=row['key'] and not r['settled'] and r['due']<=paid_on.isoformat() for r in data['rows']):
+                    e['status']='QUITADO'
+                e.setdefault('pagamentosExtras',[]).append(dict(data=paid_on.isoformat(),valor=str(reduction),valorPago=str(value),juros=str(interest),amortizacao=str(reduction),principalAntes=str(principal),principalDepois=e['principalAtual'],payment_key=row['key']))
+                db().execute('INSERT INTO payments(key,amount,paid_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET amount=excluded.amount,paid_at=excluded.paid_at',(row['key'],str(row['amount']),paid_on.isoformat()))
+                db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),contract_id))
+                audit('contract_payment_registered')
+                db().commit()
+                flash(f'Pagamento registrado: juros {brl(interest)} e amortização {brl(reduction)}.','success')
+                return redirect(url_for('receivables'))
+            except (ValueError,InvalidOperation) as err:
+                db().rollback()
+                flash(str(err),'error')
+        return render_template('contract_payment.html',page='receivables',title='Registrar pagamento',contract=e,choices=choices)
+
+    @app.post('/contrato/<int:contract_id>/historico/desfazer')
+    @protected
+    def reverse_contract_payment(contract_id):
+        db().execute('BEGIN IMMEDIATE')
+        e=next((e for e in records('contracts') if e['id']==contract_id),None)
+        if not e:
+            abort(404)
+        history=e.get('pagamentosExtras',[])
+        if not history or request.form.get('count')!=str(len(history)):
+            flash('O histórico mudou. Recarregue antes de desfazer.','error')
+            db().rollback()
+            return redirect(url_for('receivables'))
+        p=history.pop()
+        e['principalAtual']=p.get('principalAntes') or str(money(e.get('principalAtual',e['principal']))+money(p['valor']))
+        if e['status']=='QUITADO' and money(e['principalAtual'])>0:
+            e['status']='ATIVO'
+        key=p.get('payment_key') or (f"{p['data'][:7]}-{e['id']}" if Decimal(p.get('juros','0'))>0 else None)
+        if key:
+            db().execute('DELETE FROM payments WHERE key=?',(key,))
+        db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),contract_id))
+        audit('contract_payment_reversed')
+        db().commit()
+        flash('Último pagamento desfeito. Principal e cronograma recalculados.','success')
+        return redirect(url_for('receivables'))
 
     @app.post('/contrato/<int:contract_id>/amortizar')
     @protected
@@ -476,9 +635,11 @@ def create_app(test_config=None):
         try:
             principal=money(e.get('principalAtual',e['principal']))
             value=money(number(request.form.get('amount'),Decimal('.01'),principal))
+            if len(e.get('pagamentosExtras',[]))>=1000:
+                raise ValueError('Limite de 1000 pagamentos por contrato atingido.')
             # Recebimentos já confirmados guardam o valor original.
             e['principalAtual']=str(principal-value)
-            e.setdefault('pagamentosExtras',[]).append({'data':today().isoformat(),'valor':str(value)})
+            e.setdefault('pagamentosExtras',[]).append({'data':today().isoformat(),'valor':str(value),'valorPago':str(value),'juros':'0','amortizacao':str(value),'principalAntes':str(principal),'principalDepois':e['principalAtual']})
             db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),contract_id))
             audit('principal_amortized')
             db().commit()
@@ -502,18 +663,25 @@ def create_app(test_config=None):
     @app.post('/pagamento')
     @protected
     def payment():
+        db().execute('BEGIN IMMEDIATE')
         key=request.form.get('key','')
-        row=next((r for r in schedule(records('contracts')) if r['key']==key),None)
+        data=financial()
+        row=next((r for r in data['rows'] if r['key']==key),None)
         if not row:
             abort(404)
         if request.form.get('undo')=='1':
+            e=next(e for e in data['contracts'] if e['id']==row['contract'])
+            if any(p.get('payment_key')==key or (not p.get('payment_key') and Decimal(p.get('juros','0'))>0 and f"{p['data'][:7]}-{e['id']}"==key) for p in e.get('pagamentosExtras',[])):
+                db().rollback()
+                flash('Este recebimento tem histórico de juros/amortização. Desfaça o último pagamento pelo histórico do contrato.','error')
+                return redirect(url_for('receivables'))
             db().execute('DELETE FROM payments WHERE key=?',(key,))
             audit('payment_reversed')
         else:
             if row['due']>today().isoformat():
                 flash('Confirme o recebimento na data de vencimento ou após ela.','error')
                 return redirect(url_for('cashflow'))
-            db().execute('INSERT OR IGNORE INTO payments VALUES (?,?,?)',(key,str(row['amount']),today().isoformat()))
+            db().execute('INSERT INTO payments VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET amount=excluded.amount,paid_at=excluded.paid_at',(key,str(row['amount']),today().isoformat()))
             audit('payment_confirmed')
         db().commit()
         flash('Recebimento atualizado.','success')

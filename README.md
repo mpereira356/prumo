@@ -40,6 +40,8 @@ Não há senha padrão nem cadastro público. Use uma senha de pelo menos 12 car
 - Cotações B3 opcionais pelo servidor com token de ambiente.
 - Dólar comercial USD/BRL no cabeçalho de todas as páginas, com variação e horário de Brasília; atualização automática a cada cinco minutos.
 - Contratos parcelados, cheques, juros mensais e amortizações.
+- Recebíveis com edição, exclusão confirmada, filtros de situação, próxima parcela e cronograma por contrato.
+- Registro de pagamento com separação entre juros e amortização, simulação do novo principal e histórico com reversão do último lançamento.
 - Fluxo de 36 meses, atrasos, confirmação idempotente e reversão de pagamentos.
 - Metas, simulação de juros compostos e histórico de aportes.
 - Exportação CSV, backup JSON e importação validada e atômica de backups v2/v3.
@@ -60,6 +62,10 @@ Todos os usuários criados pelo CLI acessam a mesma carteira pessoal. Não há i
 Principal a amortizar fica separado das parcelas de juros. Cheques e parcelas previstas não são saldo disponível. A amortização reduz o principal e recalcula os juros pendentes, preservando valores já confirmados. Aportes mantêm um histórico; atualize as posições após compras, pois o registro do aporte não aumenta quantidades automaticamente.
 
 Simulações usam juros compostos sobre a carteira atual, sem novos aportes, impostos, taxas ou resgates. Não representam retorno garantido.
+
+No cartão de recebíveis, clique no número de parcelas/cheques para ver datas, valores e situação. O cronograma também mostra o início previsto da amortização, quando informado. **Registrar pagamento** nos contratos de juros e amortização cobre os juros pendentes da parcela e usa o excedente para reduzir o principal; pagamentos inferiores aos juros pendentes são rejeitados. **Histórico** permite consultar a divisão e desfazer o último lançamento. A opção **Registrar amortização** recebe somente principal, sem somar juros. Confirmações simples de parcelas continuam no fluxo de caixa.
+
+Contratos com pagamentos preservam suas condições financeiras durante a edição: apenas nome, apelido, risco e observações podem ser corrigidos livremente. Para corrigir condições de um contrato pago, revise e desfaça os pagamentos aplicáveis antes. A exclusão remove o contrato e seus recebimentos após confirmação; exporte backup antes. A importação do HTML mais recente preserva os campos de juros, amortização, saldo anterior e posterior no histórico. Recebimentos parciais legados são indicados como parciais.
 
 O botão **Cotações B3** requer `BRAPI_TOKEN` no ambiente e plano compatível com consultas em lote. Aceita uma tentativa a cada cinco minutos e preserva preços sem resposta. Foi testado com respostas simuladas; consultas reais exigem sua credencial. Use uma chave nova: a chave do HTML antigo precisa ser revogada. [Documentação oficial da brapi](https://brapi.dev/docs/examples/python).
 

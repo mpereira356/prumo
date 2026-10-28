@@ -195,6 +195,128 @@ class FinanceTests(unittest.TestCase):
                 self.assertIsNone(r.json['quote'])
             provider.assert_called_once()
 
+    def insert_loan(self, contract_id=90):
+        e=dict(id=contract_id,tomador='Contrato sintético',tipo='JUROS_COM_AMORTIZACAO',status='ATIVO',risco='baixo',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas=3,inicio='2026-01-15',fim='2026-03-15')
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(contract_id,json.dumps(e)))
+        return e
+
+    def test_contract_edit_and_protected_terms_after_receipt(self):
+        self.login()
+        self.insert_loan()
+        values=dict(csrf_token=self.csrf('/contrato/90/editar'),tomador='Nome corrigido',apelido='Apelido',tipo='JUROS_COM_AMORTIZACAO',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas='3',inicio='2026-01-15',fim='2026-03-15',risco='medio')
+        self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,302)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('INSERT INTO payments VALUES (?,?,?)',('2026-01-90','20.00','2026-01-15'))
+        values['taxa']='3'
+        r=self.client.post('/contrato/90/editar',data=values)
+        self.assertEqual(r.status_code,200)
+        self.assertIn('preservar o histórico'.encode(),r.data)
+        e=self.client.get('/exportar/json').json['emprestimos'][0]
+        self.assertEqual(e['taxa'],'2')
+        values['taxa']='2'
+        values['tomador']='Outro nome'
+        self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,302)
+        self.assertEqual(self.client.get('/exportar/json').json['emprestimos'][0]['tomador'],'Outro nome')
+
+    def test_combined_payment_idempotency_recalculation_and_reversal(self):
+        self.login()
+        self.insert_loan()
+        with patch('app.today',return_value=date(2026,2,15)):
+            token=self.csrf('/contrato/90/pagamento')
+            values=dict(csrf_token=token,key='2026-01-90',paid_on='2026-02-15',amount='120')
+            self.assertEqual(self.client.post('/contrato/90/pagamento',data=values).status_code,302)
+            self.client.post('/contrato/90/pagamento',data=values)
+            backup=self.client.get('/exportar/json').json
+            e=backup['emprestimos'][0]
+            self.assertEqual(e['principalAtual'],'900.00')
+            self.assertEqual(len(e['pagamentosExtras']),1)
+            self.assertEqual(e['pagamentosExtras'][0]['juros'],'20.00')
+            self.assertEqual(e['pagamentosExtras'][0]['valor'],'100.00')
+            self.assertEqual(backup['recebimentosConfirmados']['2026-01-90'],'20.00')
+            self.assertEqual(schedule([e])[-1]['amount'],Decimal('18.00'))
+            self.assertIn(b'120,00',self.client.get('/recebiveis').data)
+            self.client.post('/pagamento',data={'csrf_token':token,'key':'2026-01-90','undo':'1'})
+            self.assertIn('2026-01-90',self.client.get('/exportar/json').json['recebimentosConfirmados'])
+            self.client.post('/contrato/90/historico/desfazer',data={'csrf_token':token,'count':'1'})
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['emprestimos'][0]['principalAtual'],'1000.00')
+            self.assertEqual(backup['emprestimos'][0]['pagamentosExtras'],[])
+            self.assertEqual(backup['recebimentosConfirmados'],{})
+
+    def test_combined_payment_rejects_underpayment_and_future_date(self):
+        self.login()
+        self.insert_loan()
+        with patch('app.today',return_value=date(2026,2,15)):
+            token=self.csrf('/contrato/90/pagamento')
+            for amount,day in [('15','2026-02-15'),('20','2026-02-16'),('2000','2026-02-15')]:
+                self.client.post('/contrato/90/pagamento',data=dict(csrf_token=token,key='2026-01-90',paid_on=day,amount=amount))
+            e=self.client.get('/exportar/json').json['emprestimos'][0]
+            self.assertEqual(e['principalAtual'],'1000')
+            self.assertEqual(e['pagamentosExtras'],[])
+
+    def test_delete_contract_removes_only_its_payments(self):
+        self.login()
+        self.insert_loan(9)
+        self.insert_loan(90)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.executemany('INSERT INTO payments VALUES (?,?,?)',[('2026-01-9','20','2026-01-15'),('2026-01-90','20','2026-01-15')])
+        token=self.csrf('/recebiveis')
+        self.assertEqual(self.client.post('/contrato/9/excluir',data={'csrf_token':token}).status_code,400)
+        self.assertEqual(self.client.post('/contrato/9/excluir',data={'csrf_token':token,'confirm':'9'}).status_code,302)
+        backup=self.client.get('/exportar/json').json
+        self.assertEqual([e['id'] for e in backup['emprestimos']],[90])
+        self.assertEqual(backup['recebimentosConfirmados'],{'2026-01-90':'20'})
+
+    def test_new_html_payment_history_import_preserves_breakdown(self):
+        from validation import validate_backup
+        e=self.insert_loan()
+        e['principalAtual']='900'
+        e['pagamentosExtras']=[dict(data='2026-01-15',valorPago=120,juros=20,amortizacao=100,principalAntes=1000,principalDepois=900)]
+        backup=dict(versao=2,ativos=[],emprestimos=[e],aportes=[],recebimentosConfirmados={})
+        result=validate_backup(backup,date(2026,2,15))
+        p=result['emprestimos'][0]['pagamentosExtras'][0]
+        self.assertEqual(p['valor'],'100')
+        self.assertEqual(p['juros'],'20')
+        self.assertEqual(p['principalDepois'],'900')
+        self.login()
+        token=self.csrf('/dados')
+        self.assertEqual(self.client.post('/dados',data={'csrf_token':token,'confirm':'SUBSTITUIR','backup':(io.BytesIO(json.dumps(backup).encode()),'backup.json')}).status_code,302)
+        with patch('app.today',return_value=date(2026,2,15)):
+            r=self.client.get('/recebiveis')
+            self.assertIn(b'120,00',r.data)
+            self.assertIn(b'900,00',r.data)
+
+    def test_combined_full_repayment_marks_settled_and_can_be_reversed(self):
+        self.login()
+        self.insert_loan()
+        with patch('app.today',return_value=date(2026,1,15)):
+            token=self.csrf('/contrato/90/pagamento')
+            self.client.post('/contrato/90/pagamento',data=dict(csrf_token=token,key='2026-01-90',paid_on='2026-01-15',amount='1020'))
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['emprestimos'][0]['status'],'QUITADO')
+            self.assertEqual(len(schedule(backup['emprestimos'])),1)
+            self.assertEqual(schedule(backup['emprestimos'])[0]['amount'],Decimal('20.00'))
+            self.client.post('/contrato/90/historico/desfazer',data={'csrf_token':token,'count':'1'})
+            self.assertEqual(self.client.get('/exportar/json').json['emprestimos'][0]['status'],'ATIVO')
+
+    def test_partial_legacy_interest_keeps_remaining_amount(self):
+        self.login()
+        e=self.insert_loan()
+        e['pagamentosExtras']=[dict(data='2026-01-15',valorPago=5,juros=5,amortizacao=0,principalAntes=1000,principalDepois=1000)]
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('UPDATE contracts SET payload=? WHERE id=90',(json.dumps(e),))
+        with patch('app.today',return_value=date(2026,1,15)):
+            r=self.client.get('/fluxo')
+            self.assertIn(b'Parcial',r.data)
+            self.assertIn(b'5,00',r.data)
+            token=self.csrf('/contrato/90/pagamento')
+            r=self.client.post('/contrato/90/pagamento',data=dict(csrf_token=token,key='2026-01-90',paid_on='2026-01-15',amount='15'))
+            self.assertEqual(r.status_code,302)
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados']['2026-01-90'],'20.00')
+            self.assertEqual(backup['emprestimos'][0]['principalAtual'],'1000.00')
+
 
 if __name__=='__main__':
     unittest.main()

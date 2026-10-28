@@ -27,6 +27,24 @@ def integer(value, low=1, high=480):
         raise ValueError('Identificador ou quantidade inválida.')
     return value
 
+def normalize_extra(p):
+    if not isinstance(p,dict):
+        raise ValueError('Pagamento inválido.')
+    result={'data':iso(p['data']),'valor':numeric(p.get('valor',p.get('amortizacao',0)))}
+    for k in ('valorPago','juros','amortizacao','principalAntes','principalDepois'):
+        if k in p:
+            result[k]=numeric(p[k])
+    if p.get('payment_key'):
+        result['payment_key']=string(p['payment_key'],100)
+    if 'juros' in result:
+        principal=Decimal(result['valor'])
+        interest=Decimal(result['juros'])
+        result.setdefault('amortizacao',str(principal))
+        result.setdefault('valorPago',str(principal+interest))
+        if abs(Decimal(result['valorPago'])-principal-interest)>Decimal('.01'):
+            raise ValueError('Pagamento com juros e amortização inconsistentes.')
+    return result
+
 def validate_backup(payload, today):
     if not isinstance(payload,dict) or payload.get('versao') not in (2,3):
         raise ValueError('Versão não suportada. Exporte um backup v2 do HTML ou v3 do Flask.')
@@ -59,12 +77,12 @@ def validate_backup(payload, today):
         entry['risco']=e.get('risco','medio')
         if entry['risco'] not in ('baixo','medio','alto'):
             raise ValueError('Risco inválido.')
-        entry['parcelas']=integer(e.get('parcelas',1))
+        entry['parcelas']=integer(e.get('parcelas') or 1)
         schedule_limit+=entry['parcelas']
         if schedule_limit>20000:
             raise ValueError('Cronograma muito grande.')
         for k in ('principal','principalAtual','valorMensal','taxa','primeiraParcela'):
-            if k in e:
+            if k in e and e[k] is not None:
                 entry[k]=numeric(e[k],0,100 if k=='taxa' else 100000000000)
         entry.setdefault('principal','0')
         entry.setdefault('valorMensal','0')
@@ -95,7 +113,7 @@ def validate_backup(payload, today):
         for p in e.get('pagamentosExtras',[]):
             if not isinstance(p,dict):
                 raise ValueError('Amortização inválida.')
-            entry['pagamentosExtras'].append({'data':iso(p['data']),'valor':numeric(p.get('valor',p.get('amortizacao',0)))})
+            entry['pagamentosExtras'].append(normalize_extra(p))
         if entry['tipo']=='JUROS_MENSAIS' and entry['fim']:
             start,end=date.fromisoformat(entry['inicio']),date.fromisoformat(entry['fim'])
             if (end.year-start.year)*12+end.month-start.month>480:

@@ -51,6 +51,27 @@ document.querySelectorAll('.schedule-dialog').forEach(dialog => {
   });
 });
 
+const paymentForm = document.getElementById('combined-payment');
+if (paymentForm) {
+  const installment = document.getElementById('payment-installment');
+  const amount = document.getElementById('payment-amount');
+  const principal = Math.round(Number(paymentForm.dataset.principal) * 100);
+  const currency = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
+  function paymentPreview() {
+    const interest = Math.round(Number(installment.selectedOptions[0].dataset.interest) * 100);
+    const value = Math.round(Number(amount.value || 0) * 100);
+    const reduction = Math.min(principal, Math.max(0, value - interest));
+    amount.min = (interest / 100).toFixed(2);
+    amount.max = ((interest + principal) / 100).toFixed(2);
+    document.getElementById('preview-interest').textContent = currency.format(interest / 100);
+    document.getElementById('preview-reduction').textContent = currency.format(reduction / 100);
+    document.getElementById('preview-balance').textContent = currency.format((principal - reduction) / 100);
+  }
+  installment.addEventListener('change', paymentPreview);
+  amount.addEventListener('input', paymentPreview);
+  paymentPreview();
+}
+
 const dollar = document.getElementById('dollar-quote');
 if (dollar) {
   let fetching = false;
