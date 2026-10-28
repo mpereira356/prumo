@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-TABLES=('assets','contracts','payments','contributions','settings')
+TABLES=('assets','contracts','payments','contributions','wallet_entries','wallet_sources','settings')
 
 def snapshot(connection):
     state={}
@@ -10,7 +10,7 @@ def snapshot(connection):
         if table=='settings':
             rows=connection.execute("SELECT * FROM settings WHERE key IN ('goal','rate') ORDER BY key")
         else:
-            order='key' if table=='payments' else 'id'
+            order='key' if table=='payments' else 'reference' if table=='wallet_sources' else 'id'
             rows=connection.execute(f'SELECT * FROM {table} ORDER BY {order}')
         state[table]=[dict(row) for row in rows]
     return json.dumps(state,sort_keys=True,separators=(',',':'),ensure_ascii=False)

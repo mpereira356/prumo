@@ -36,7 +36,8 @@ Não há senha padrão nem cadastro público. Use uma senha de pelo menos 12 car
 
 ## Funcionalidades
 
-- Carteira com busca, filtros, cadastro, edição e exclusão de posições.
+- Meus investimentos com busca, filtros, compras limitadas pelo saldo e resgates.
+- Carteira de dinheiro disponível, adição de saldo com origem e Extrato de entradas e saídas.
 - Cotações B3 opcionais pelo servidor com token de ambiente.
 - Dólar comercial USD/BRL no cabeçalho de todas as páginas, com variação e horário de Brasília; atualização automática a cada cinco minutos.
 - Contratos parcelados, cheques, juros mensais e amortizações.
@@ -44,7 +45,7 @@ Não há senha padrão nem cadastro público. Use uma senha de pelo menos 12 car
 - Registro de pagamento com separação entre juros e amortização, simulação do novo principal e histórico com reversão do último lançamento.
 - Fluxo de 36 meses, atrasos, confirmação idempotente e reversão de pagamentos.
 - Metas, simulação de juros compostos e histórico de aportes.
-- Exportação CSV, backup JSON e importação validada e atômica de backups v2/v3.
+- Exportação CSV, backup JSON e importação validada e atômica de backups v2/v3/v4.
 - Interface responsiva, navegação por teclado e tema claro/escuro.
 
 ## Dados e migração
@@ -56,6 +57,18 @@ Para migrar do painel antigo, exporte um JSON no HTML usando o mesmo navegador/o
 Em desenvolvimento, o banco fica em `instance/financeiro.sqlite3`. Em produção, `PRUMO_INSTANCE_PATH` define a pasta persistente. O JSON inclui dados financeiros, mas não senhas. O backup SQLite inclui usuários e exige proteção adicional. O banco não é criptografado pela aplicação: use criptografia do disco e permissões do sistema operacional.
 
 Todos os usuários criados pelo CLI acessam a mesma carteira pessoal. Não há isolamento multicliente.
+
+## Carteira, investimentos e extrato
+
+**Carteira** é dinheiro disponível, separado do patrimônio aplicado em **Meus investimentos**. O card aparece na Visão geral e nos investimentos. O botão **Adicionar saldo** pede o valor e a origem e gera uma entrada no **Extrato**. Como combinado para a migração, a Carteira começa em **R$ 0**: pagamentos confirmados antes da ativação não são creditados novamente. Informe manualmente o saldo inicial realmente disponível. Essa migração é executada uma única vez, sem apagar posições ou recebíveis.
+
+Novos recebimentos confirmados entram automaticamente, incluindo cheques, juros, multa, mora e principal amortizado. Confirmações repetidas não duplicam o crédito. Estornos, mudanças de cheque pago para não pago e exclusões de contratos revertem o valor correspondente. Se esse dinheiro já tiver sido investido e faltar saldo para o estorno, a operação é bloqueada: resgate investimentos ou adicione saldo antes de desfazer o recebimento.
+
+**Nova posição** desconta da Carteira o custo de aquisição, calculado por quantidade × preço médio de compra. Compras acima do saldo são rejeitadas no servidor, inclusive em requisições simultâneas. A cotação de mercado não movimenta dinheiro. A edição preserva quantidade e custo; compras adicionais podem ser cadastradas como novas posições. **Resgatar** registra a quantidade vendida e o preço efetivamente recebido por unidade, reduz a posição e devolve o dinheiro à Carteira. Excluir o cadastro de uma posição não simula venda e não credita dinheiro automaticamente. As operações são registros pessoais; não enviam ordens a corretoras.
+
+O **Extrato** mostra valores positivos e negativos, origem/destino, horário de Brasília e saldo após cada movimento. A barra de **Desfazer** também restaura saldo e extrato junto com a operação. Aportes antigos da página de metas continuam como histórico e não movimentam a Carteira; para movimentar dinheiro, use Adicionar saldo ou Nova posição.
+
+Backups **v4** incluem saldo, extrato e conciliação dos recebimentos. Importações antigas (v2/v3), que não possuem Carteira, substituem os dados e reiniciam seu saldo disponível em R$ 0; confirme o saldo inicial manualmente após importar. Faça backup antes de substituir dados. Os valores do caixa são armazenados em centavos inteiros para evitar erros de ponto flutuante.
 
 ## Cálculos e cotações
 

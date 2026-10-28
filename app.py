@@ -20,6 +20,7 @@ from flask_wtf.csrf import CSRFProtect, CSRFError
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import SecurityError
 from undo import snapshot, fingerprint, restore
+import wallet
 
 ROOT = Path(__file__).resolve().parent
 CLASSES = {'ACOES': 'Ações', 'FIIs': 'Fundos imobiliários', 'TESOURO': 'Tesouro Direto', 'RF': 'Renda fixa', 'PREV': 'Previdência', 'BDR': 'BDRs', 'ETF': 'ETFs', 'COE': 'COE'}
@@ -155,6 +156,8 @@ def create_app(test_config=None):
         CREATE INDEX IF NOT EXISTS attempts_bucket ON attempts(bucket, stamp);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, user_id INTEGER, action TEXT NOT NULL, stamp TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS exchange_rates(pair TEXT PRIMARY KEY, payload TEXT, attempted REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS wallet_entries(id INTEGER PRIMARY KEY, amount_cents INTEGER NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL, reference TEXT NOT NULL, created TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS wallet_sources(reference TEXT PRIMARY KEY, baseline_cents INTEGER NOT NULL, credited_cents INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS undo_actions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, session_hash TEXT NOT NULL, label TEXT NOT NULL, before_state TEXT NOT NULL, after_hash TEXT NOT NULL, created REAL NOT NULL, activated REAL, expires REAL NOT NULL, destination TEXT NOT NULL);
         ''')
         if not db().execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
@@ -166,6 +169,9 @@ def create_app(test_config=None):
             db().executemany('INSERT INTO contracts(id,payload) VALUES (?,?)', [(e['id'],json.dumps(e)) for e in initial['emprestimos']])
             db().executemany('INSERT INTO settings VALUES (?,?)', [('initialized','1'),('goal','300000'),('rate','0.8')])
             db().commit()
+        db().execute('BEGIN IMMEDIATE')
+        wallet.initialize(db())
+        db().commit()
 
     def begin_change():
         if not db().in_transaction:
@@ -175,12 +181,14 @@ def create_app(test_config=None):
             g.undo_before=snapshot(db())
 
     def audit(action):
+        if action!='change_undone':
+            wallet.sync_receipts(db())
         db().execute('INSERT INTO audit(user_id,action,stamp) VALUES (?,?,?)', (g.user['id'] if g.user else None, action, datetime.now().isoformat()))
         if g.get('undo_before') is not None and g.get('user'):
             after=snapshot(db())
             if after!=g.undo_before:
-                labels={'asset_saved':'Posição salva','asset_deleted':'Posição excluída','contract_created':'Contrato criado','contract_updated':'Contrato alterado','contract_deleted':'Contrato excluído','cheque_status_paid':'Pagamento do cheque confirmado','cheque_status_late':'Cheque marcado em atraso','cheque_status_on_time':'Situação do cheque alterada','contract_payment_registered':'Pagamento registrado','contract_payment_reversed':'Pagamento desfeito','principal_amortized':'Amortização registrada','payment_confirmed':'Recebimento confirmado','payment_reversed':'Recebimento desfeito','goals_updated':'Meta alterada','contribution_added':'Aporte registrado','backup_imported':'Backup importado','quotes_refreshed':'Cotações atualizadas'}
-                destination='portfolio' if action.startswith('asset_') or action=='quotes_refreshed' else 'goals' if action in ('goals_updated','contribution_added') else 'dashboard' if action=='backup_imported' else 'receivables'
+                labels={'wallet_deposit':'Saldo adicionado','asset_sold':'Resgate registrado','asset_saved':'Posição salva','asset_deleted':'Posição excluída','contract_created':'Contrato criado','contract_updated':'Contrato alterado','contract_deleted':'Contrato excluído','cheque_status_paid':'Pagamento do cheque confirmado','cheque_status_late':'Cheque marcado em atraso','cheque_status_on_time':'Situação do cheque alterada','contract_payment_registered':'Pagamento registrado','contract_payment_reversed':'Pagamento desfeito','principal_amortized':'Amortização registrada','payment_confirmed':'Recebimento confirmado','payment_reversed':'Recebimento desfeito','goals_updated':'Meta alterada','contribution_added':'Aporte registrado','backup_imported':'Backup importado','quotes_refreshed':'Cotações atualizadas'}
+                destination='portfolio' if action.startswith('asset_') or action=='quotes_refreshed' else 'statement' if action.startswith('wallet_') else 'goals' if action in ('goals_updated','contribution_added') else 'dashboard' if action=='backup_imported' else 'receivables'
                 token=secrets.token_urlsafe(32)
                 now=time.time()
                 session_hash=hashlib.sha256(session['token'].encode()).hexdigest()
@@ -445,7 +453,7 @@ def create_app(test_config=None):
         amortized=sum((money(p['valor']) for e in contracts for p in e.get('pagamentosExtras',[])),Decimal(0))
         return dict(assets=assets, contracts=contracts, rows=rows, invested=invested,cost=cost, gain=invested-cost,
             pending=pending, principal=principal, allocation=allocation, settings=settings,
-            total=invested+pending+principal, paid=sum(payments.values(),Decimal(0))+amortized+unscheduled_interest,
+            wallet_balance=Decimal(wallet.balance(db()))/100,total=invested+pending+principal+Decimal(wallet.balance(db()))/100, paid=sum(payments.values(),Decimal(0))+amortized+unscheduled_interest,
             contributions=[dict(r) for r in db().execute('SELECT * FROM contributions ORDER BY day DESC,id DESC')])
 
     def record_receipt(e, row, paid_on):
@@ -472,7 +480,7 @@ def create_app(test_config=None):
         q=request.args.get('q','').strip()[:100]
         category=request.args.get('classe','')
         data['assets']=[a for a in data['assets'] if (not category or a['classe']==category) and (not q or q.lower() in (a['nome']+' '+a['ticker']).lower())]
-        return render_template('portfolio.html',page='portfolio',title='Minha carteira',q=q,category=category,**data)
+        return render_template('portfolio.html',page='portfolio',title='Meus investimentos',q=q,category=category,**data)
 
     @app.post('/cotacoes')
     @protected
@@ -523,17 +531,91 @@ def create_app(test_config=None):
                 a['updated_at']=today().isoformat()
                 begin_change()
                 if asset_id:
+                    current=next((item for item in records('assets') if item['id']==asset_id),None)
+                    if not current:
+                        abort(404)
+                    if Decimal(a['qtd'])!=Decimal(str(current['qtd'])) or Decimal(a['pm'])!=Decimal(str(current['pm'])):
+                        raise ValueError('Quantidade e preço de aquisição ficam preservados. Registre uma nova posição para comprar ou use Resgatar para vender.')
                     db().execute('UPDATE assets SET payload=? WHERE id=?',(json.dumps(a),asset_id))
                 else:
+                    acquisition=wallet.cents(Decimal(a['qtd'])*Decimal(a['pm']))
+                    if acquisition<=0:
+                        raise ValueError('A compra deve ter custo maior que zero.')
+                    wallet.entry(db(),-acquisition,'purchase',f'Compra · {a["ticker"]} · {a["qtd"]} unidades')
                     db().execute('INSERT INTO assets(payload) VALUES (?)',(json.dumps(a),))
                 audit('asset_saved')
                 db().commit()
                 flash('Posição salva. Os totais foram recalculados.','success')
                 return redirect(url_for('portfolio'))
             except ValueError as e:
+                db().rollback()
                 flash(str(e),'error')
                 asset=request.form
-        return render_template('asset_form.html',asset=asset or {},page='portfolio',title='Editar posição' if asset_id else 'Nova posição')
+        return render_template('asset_form.html',asset=asset or {},editing=bool(asset_id),wallet_balance=Decimal(wallet.balance(db()))/100,page='portfolio',title='Editar posição' if asset_id else 'Nova posição')
+
+    @app.route('/ativo/<int:asset_id>/resgatar',methods=['GET','POST'])
+    @protected
+    def sell_asset(asset_id):
+        asset=next((a for a in records('assets') if a['id']==asset_id),None)
+        if not asset:
+            abort(404)
+        if request.method=='POST':
+            try:
+                begin_change()
+                asset=next((a for a in records('assets') if a['id']==asset_id),None)
+                if not asset:
+                    abort(404)
+                quantity=number(request.form.get('qtd'),Decimal('.000001'),Decimal(str(asset['qtd'])))
+                price=number(request.form.get('preco'),Decimal('.01'))
+                value=wallet.cents(quantity*price)
+                if value<=0:
+                    raise ValueError('Informe um resgate maior que zero.')
+                wallet.entry(db(),value,'sale',f'Resgate · {asset["ticker"]} · {quantity} unidades')
+                remaining=Decimal(str(asset['qtd']))-quantity
+                if remaining:
+                    asset['qtd']=str(remaining)
+                    asset['valor']=str(money(remaining*Decimal(str(asset['atual']))))
+                    db().execute('UPDATE assets SET payload=? WHERE id=?',(json.dumps(asset),asset_id))
+                else:
+                    db().execute('DELETE FROM assets WHERE id=?',(asset_id,))
+                audit('asset_sold')
+                db().commit()
+                flash(f'Resgate registrado. {brl(Decimal(value)/100)} disponíveis na Carteira.','success')
+                return redirect(url_for('portfolio'))
+            except ValueError as error:
+                db().rollback()
+                flash(str(error),'error')
+        return render_template('sell_asset.html',asset=asset,page='portfolio',title='Resgatar investimento')
+
+    @app.get('/extrato')
+    @protected
+    def statement():
+        running=0
+        movements=[]
+        for row in db().execute('SELECT * FROM wallet_entries ORDER BY id'):
+            running+=row['amount_cents']
+            item=dict(row)
+            item['amount']=Decimal(row['amount_cents'])/100
+            item['balance']=Decimal(running)/100
+            item['when']=datetime.fromisoformat(row['created']).astimezone(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y %H:%M')
+            movements.append(item)
+        return render_template('statement.html',page='statement',title='Extrato',wallet_balance=Decimal(running)/100,movements=list(reversed(movements)))
+
+    @app.post('/carteira/adicionar')
+    @protected
+    def wallet_deposit():
+        try:
+            value=wallet.cents(number(request.form.get('amount'),Decimal('.01')))
+            origin=text(request.form.get('origin',''),300)
+            begin_change()
+            wallet.entry(db(),value,'deposit',origin)
+            audit('wallet_deposit')
+            db().commit()
+            flash('Saldo adicionado à Carteira.','success')
+        except ValueError as error:
+            db().rollback()
+            flash(str(error),'error')
+        return redirect(url_for('statement'))
 
     @app.post('/ativo/<int:asset_id>/excluir')
     @protected
@@ -637,6 +719,7 @@ def create_app(test_config=None):
                     if has_payments and signature(original)!=signature(e):
                         raise ValueError('Contrato com pagamentos: altere nome, apelido, risco, observações ou encargos de atraso para preservar o histórico.')
                 else:
+                    e['walletRef']=secrets.token_hex(16)
                     cur=db().execute('INSERT INTO contracts(payload) VALUES (?)',(json.dumps(e),))
                     e['id']=cur.lastrowid
                 db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),e['id']))
@@ -883,7 +966,7 @@ def create_app(test_config=None):
                 backup=validate_backup(json.loads(upload.read()), today())
                 begin_change()
                 # Valida tudo antes de iniciar a substituição atômica.
-                for table in ('assets','contracts','payments','contributions'):
+                for table in ('assets','contracts','payments','contributions','wallet_entries','wallet_sources'):
                     db().execute(f'DELETE FROM {table}')
                 db().executemany('INSERT INTO assets(payload) VALUES (?)',[(json.dumps(a),) for a in backup['ativos']])
                 db().executemany('INSERT INTO contracts(id,payload) VALUES (?,?)',[(e['id'],json.dumps(e)) for e in backup['emprestimos']])
@@ -892,6 +975,20 @@ def create_app(test_config=None):
                 for k in ('goal','rate'):
                     if k in backup['settings']:
                         db().execute('UPDATE settings SET value=? WHERE key=?',(backup['settings'][k],k))
+                if 'wallet' in backup:
+                    for row in backup['wallet']['entries']:
+                        db().execute('INSERT INTO wallet_entries VALUES (?,?,?,?,?,?)',tuple(row[k] for k in ('id','amount_cents','kind','description','reference','created')))
+                    for row in backup['wallet']['sources']:
+                        db().execute('INSERT INTO wallet_sources VALUES (?,?,?)',(row['reference'],row['baseline_cents'],row['credited_cents']))
+                    targets=wallet.receipt_sources(db())
+                    stored={r['reference']:r for r in db().execute('SELECT * FROM wallet_sources')}
+                    for ref in targets.keys()|stored.keys():
+                        amount=targets.get(ref,(0,''))[0]
+                        source=stored.get(ref,dict(baseline_cents=0,credited_cents=0))
+                        if max(0,amount-source['baseline_cents'])!=source['credited_cents']:
+                            raise ValueError('Saldo da Carteira não corresponde aos recebimentos do backup.')
+                else:
+                    wallet.initialize(db(),force=True)
                 audit('backup_imported')
                 db().commit()
                 flash('Backup validado e importado.','success')
@@ -905,9 +1002,9 @@ def create_app(test_config=None):
     @protected
     def export(kind):
         if kind=='json':
-            payload=dict(versao=3,exportadoEm=datetime.now().isoformat(),ativos=records('assets'),emprestimos=records('contracts'),
+            payload=dict(versao=4,exportadoEm=datetime.now().isoformat(),ativos=records('assets'),emprestimos=records('contracts'),
                 recebimentosConfirmados={r['key']:r['amount'] for r in db().execute('SELECT * FROM payments')},
-                aportes=[dict(r) for r in db().execute('SELECT * FROM contributions')],settings={r['key']:r['value'] for r in db().execute('SELECT * FROM settings')})
+                aportes=[dict(r) for r in db().execute('SELECT * FROM contributions')],settings={r['key']:r['value'] for r in db().execute('SELECT * FROM settings')},wallet=dict(entries=[dict(r) for r in db().execute('SELECT * FROM wallet_entries ORDER BY id')],sources=[dict(r) for r in db().execute('SELECT * FROM wallet_sources ORDER BY reference')]))
             return Response(json.dumps(payload,ensure_ascii=False,indent=2),mimetype='application/json',headers={'Content-Disposition':'attachment; filename=prumo-backup.json'})
         if kind!='csv':
             abort(404)
@@ -917,11 +1014,17 @@ def create_app(test_config=None):
         for a in records('assets'):
             vals=[str(a[k]) for k in ('ticker','nome','classe','qtd','pm','atual')]
             writer.writerow(["'"+v if v.startswith(('=','+','-','@','\t','\r','\n')) else v for v in vals])
-        return Response('\ufeff'+out.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=prumo-carteira.csv'})
+        return Response('\ufeff'+out.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=prumo-investimentos.csv'})
 
     @app.errorhandler(CSRFError)
     def csrf_error(error):
         return render_template('error.html',title='Sessão do formulário expirou',message='Recarregue a página e tente novamente.'),400
+
+    @app.errorhandler(wallet.WalletError)
+    def wallet_error(error):
+        db().rollback()
+        flash(str(error),'error')
+        return redirect(url_for('statement'))
 
     @app.errorhandler(SecurityError)
     def untrusted_host(error):

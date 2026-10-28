@@ -58,6 +58,7 @@ class FinanceTests(unittest.TestCase):
 
     def test_asset_validation_xss_and_persistence(self):
         self.login()
+        self.client.post('/carteira/adicionar',data={'csrf_token':self.csrf('/extrato'),'amount':'100','origin':'Saldo de teste'})
         token=self.csrf('/ativo/novo')
         values={'csrf_token':token,'ticker':'<script>alert(1)</script>','nome':'Teste','classe':'RF','qtd':'2','pm':'10.25','atual':'11.50'}
         self.assertEqual(self.client.post('/ativo/novo',data=values).status_code,302)

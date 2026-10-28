@@ -37,6 +37,24 @@ function showCheque() { const field = document.getElementById('cheque-field'); i
 type?.addEventListener('change', showCheque);
 if (type) showCheque();
 
+const purchase = document.getElementById('asset-purchase');
+if (purchase?.dataset.editing === '0') {
+  const format = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
+  const available = Math.round(Number(purchase.dataset.balance)*100);
+  function updatePurchase() {
+    const cost = Math.round(Number(purchase.elements.qtd.value || 0)*Number(purchase.elements.pm.value || 0)*100);
+    document.getElementById('purchase-cost').textContent = format.format(cost/100);
+    const remaining = document.getElementById('purchase-remaining');
+    remaining.textContent = format.format((available-cost)/100);
+    remaining.className = cost>available ? 'negative' : 'positive';
+    document.getElementById('purchase-message').textContent = cost>available ? 'Saldo insuficiente. Adicione saldo à Carteira para investir esse valor.' : 'Este valor será descontado da sua Carteira ao salvar.';
+    purchase.querySelector('button[type="submit"], .form-actions button').disabled = cost<=0 || cost>available;
+  }
+  purchase.addEventListener('input',updatePurchase);
+  window.addEventListener('pageshow',updatePurchase);
+  updatePurchase();
+}
+
 function placeUndoToast(dialog) {
   const toast = document.getElementById('undo-toast');
   if (toast) dialog.appendChild(toast);

@@ -1,6 +1,7 @@
 """Validação estrita dos backups anteriores e atuais; sem executar conteúdo enviado."""
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import re
 
 CLASSES={'ACOES','FIIs','TESOURO','RF','PREV','BDR','ETF','COE'}
 TYPES={'PARCELADO','CHEQUES','JUROS_COM_AMORTIZACAO','JUROS_MENSAIS','UNICO'}
@@ -47,8 +48,8 @@ def normalize_extra(p):
     return result
 
 def validate_backup(payload, today):
-    if not isinstance(payload,dict) or payload.get('versao') not in (2,3):
-        raise ValueError('Versão não suportada. Exporte um backup v2 do HTML ou v3 do Flask.')
+    if not isinstance(payload,dict) or payload.get('versao') not in (2,3,4):
+        raise ValueError('Versão não suportada. Use um backup v2, v3 ou v4.')
     result={'ativos':[],'emprestimos':[],'recebimentosConfirmados':{},'aportes':[],'settings':{}}
     for field,limit in [('ativos',1000),('emprestimos',200),('aportes',5000)]:
         if not isinstance(payload.get(field,[]),list) or len(payload.get(field,[]))>limit:
@@ -64,12 +65,20 @@ def validate_backup(payload, today):
             entry['updated_at']=iso(a['updated_at'])
         result['ativos'].append(entry)
     ids=set()
+    wallet_refs=set()
     schedule_limit=0
     for e in payload.get('emprestimos',[]):
         if not isinstance(e,dict):
             raise ValueError('Contrato inválido.')
         entry={k:string(e[k]) for k in ('tomador','tipo','status')}
         entry['id']=integer(e['id'],1,2147483647)
+        if e.get('walletRef'):
+            if not isinstance(e['walletRef'],str) or not re.fullmatch(r'[a-f0-9]{32}',e['walletRef']):
+                raise ValueError('Referência financeira do contrato inválida.')
+            if e['walletRef'] in wallet_refs:
+                raise ValueError('Referência financeira duplicada entre contratos.')
+            wallet_refs.add(e['walletRef'])
+            entry['walletRef']=e['walletRef']
         if entry['id'] in ids or entry['tipo'] not in TYPES or entry['status'] not in ('ATIVO','QUITADO'):
             raise ValueError('Contrato duplicado ou tipo inválido.')
         ids.add(entry['id'])
@@ -177,4 +186,7 @@ def validate_backup(payload, today):
         result['settings']['goal']=numeric(settings['goal'],1)
     if 'rate' in settings:
         result['settings']['rate']=numeric(settings['rate'],0,10)
+    if payload['versao']==4:
+        from wallet import validate_state
+        result['wallet']=validate_state(payload.get('wallet'))
     return result
