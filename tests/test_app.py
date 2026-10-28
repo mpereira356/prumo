@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
-from app import create_app, schedule
+from app import create_app, schedule, monthly_receipts
 from werkzeug.security import generate_password_hash
 
 
@@ -119,6 +119,19 @@ class FinanceTests(unittest.TestCase):
         rows=schedule([e])
         self.assertEqual([r['due'] for r in rows],['2026-01-31','2026-02-28','2026-03-31'])
         self.assertEqual([r['amount'] for r in rows],[Decimal('20.00'),Decimal('10.00'),Decimal('10.00')])
+
+    def test_monthly_receipts_groups_values_and_handles_year_boundary(self):
+        rows=[dict(due=d,amount=Decimal(a),paid=Decimal(p)) for d,a,p in [
+            ('2026-11-30','999','0'),('2026-12-10','100.10','100.10'),
+            ('2026-12-20','200.20','0'),('2027-01-01','50.50','0'),
+            ('2027-06-01','888','0')]]
+        months=monthly_receipts(rows,date(2026,12,27))
+        self.assertEqual(len(months),6)
+        self.assertEqual(months[0],dict(key='2026-12',label='Dezembro / 2026',total=Decimal('300.30'),paid=Decimal('100.10'),pending=Decimal('200.20')))
+        self.assertEqual(months[1]['total'],Decimal('50.50'))
+        self.assertEqual(months[-1]['key'],'2027-05')
+        self.assertEqual(months[-1]['total'],0)
+        self.assertEqual(sum(m['total'] for m in months),Decimal('350.80'))
 
     def test_quote_update_keeps_token_on_server_and_preserves_failed_prices(self):
         self.login()

@@ -49,6 +49,21 @@ def add_month(d, months):
     y, m = divmod(d.year * 12 + d.month - 1 + months, 12)
     return date(y, m + 1, min(d.day, calendar.monthrange(y, m + 1)[1]))
 
+def monthly_receipts(rows, start, count=6):
+    names=('Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro')
+    months={}
+    for i in range(count):
+        d=add_month(start.replace(day=1),i)
+        key=d.strftime('%Y-%m')
+        months[key]=dict(key=key,label=f'{names[d.month-1]} / {d.year}',total=Decimal(0),paid=Decimal(0),pending=Decimal(0))
+    for row in rows:
+        month=months.get(row['due'][:7])
+        if month is not None:
+            month['total']+=row['amount']
+            month['paid']+=row['paid']
+            month['pending']+=row['amount']-row['paid']
+    return list(months.values())
+
 def schedule(contracts):
     rows = []
     for e in contracts:
@@ -323,7 +338,8 @@ def create_app(test_config=None):
     @protected
     def dashboard():
         data=financial()
-        data['upcoming']=[r for r in data['rows'] if not r['paid']][:6]
+        data['upcoming_months']=monthly_receipts(data['rows'],today())
+        data['upcoming_totals']={k:sum((m[k] for m in data['upcoming_months']),Decimal(0)) for k in ('total','paid','pending')}
         data['overdue']=sum((r['amount'] for r in data['rows'] if r['overdue']),Decimal(0))
         data['monthly']=sum((r['amount'] for r in data['rows'] if r['due'][:7]==today().strftime('%Y-%m')),Decimal(0))
         return render_template('dashboard.html',page='dashboard',title='Visão geral',**data)
