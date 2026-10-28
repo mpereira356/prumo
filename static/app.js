@@ -37,6 +37,20 @@ function showCheque() { const field = document.getElementById('cheque-field'); i
 type?.addEventListener('change', showCheque);
 if (type) showCheque();
 
+document.querySelectorAll('[data-schedule-dialog]').forEach(button => {
+  button.addEventListener('click', () => {
+    const dialog = document.getElementById(button.dataset.scheduleDialog);
+    if (dialog && !dialog.open) dialog.showModal();
+  });
+});
+document.querySelectorAll('.schedule-dialog').forEach(dialog => {
+  dialog.querySelector('[data-dialog-close]').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', event => {
+    const rect = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
+  });
+});
+
 const dollar = document.getElementById('dollar-quote');
 if (dollar) {
   let fetching = false;

@@ -21,6 +21,8 @@ def main():
         password=secrets.token_urlsafe(24)
         with closing(sqlite3.connect(database)) as conn, conn:
             conn.execute('INSERT INTO users(username,password) VALUES (?,?)',('preview',generate_password_hash(password)))
+            contract={'tomador':'Contrato de teste','tipo':'PARCELADO','status':'ATIVO','risco':'baixo','principal':800,'valorMensal':110,'parcelas':8,'inicio':'2026-11-10','fim':'2027-06-10'}
+            conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9901,json.dumps(contract)))
         server=make_server('127.0.0.1',5058,app)
         thread=threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
@@ -43,6 +45,18 @@ def main():
                 for route in ['carteira','recebiveis','fluxo','metas','dados','ativo/novo','contrato/novo']:
                     response=page.goto('http://127.0.0.1:5058/'+route)
                     assert response.status==200,(route,response.status)
+                page.goto('http://127.0.0.1:5058/recebiveis')
+                trigger=page.get_by_role('button',name='Ver cronograma de Contrato de teste',exact=True)
+                assert trigger.inner_text()=='8'
+                trigger.click()
+                dialog=page.get_by_role('dialog',name='Contrato de teste',exact=True)
+                assert dialog.is_visible()
+                assert dialog.locator('tbody tr').count()==8
+                assert '10/11/2026' in dialog.inner_text() and '10/06/2027' in dialog.inner_text()
+                assert '880,00' in dialog.inner_text()
+                page.keyboard.press('Escape')
+                assert not dialog.is_visible()
+                assert trigger.evaluate('(el)=>el===document.activeElement')
                 page.goto('http://127.0.0.1:5058/')
                 page.get_by_role('button',name='Alternar tema').click()
                 page.screenshot(path='artifacts/dashboard-dark.png',full_page=True)
@@ -54,6 +68,14 @@ def main():
                 page.get_by_role('link',name='Minha carteira',exact=False).click()
                 page.wait_for_url('**/carteira')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'Overflow mobile na carteira'
+                page.goto('http://127.0.0.1:5058/recebiveis')
+                page.get_by_role('button',name='Ver cronograma de Contrato de teste',exact=True).click()
+                dialog=page.get_by_role('dialog',name='Contrato de teste',exact=True)
+                assert dialog.is_visible()
+                assert dialog.evaluate('(el)=>el.getBoundingClientRect().right <= innerWidth')
+                page.screenshot(path='artifacts/schedule-mobile.png',full_page=True)
+                dialog.get_by_role('button',name='Fechar cronograma').click()
+                assert not dialog.is_visible()
                 assert not errors, errors
                 browser.close()
                 print('Browser QA: desktop, mobile, dark mode, navigation and console OK.')
