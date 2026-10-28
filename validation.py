@@ -31,7 +31,7 @@ def normalize_extra(p):
     if not isinstance(p,dict):
         raise ValueError('Pagamento inválido.')
     result={'data':iso(p['data']),'valor':numeric(p.get('valor',p.get('amortizacao',0)))}
-    for k in ('valorPago','juros','amortizacao','principalAntes','principalDepois'):
+    for k in ('valorPago','juros','amortizacao','principalAntes','principalDepois','multa','mora'):
         if k in p:
             result[k]=numeric(p[k])
     if p.get('payment_key'):
@@ -40,8 +40,9 @@ def normalize_extra(p):
         principal=Decimal(result['valor'])
         interest=Decimal(result['juros'])
         result.setdefault('amortizacao',str(principal))
-        result.setdefault('valorPago',str(principal+interest))
-        if abs(Decimal(result['valorPago'])-principal-interest)>Decimal('.01'):
+        charges=Decimal(result.get('multa',0))+Decimal(result.get('mora',0))
+        result.setdefault('valorPago',str(principal+interest+charges))
+        if abs(Decimal(result['valorPago'])-principal-interest-charges)>Decimal('.01'):
             raise ValueError('Pagamento com juros e amortização inconsistentes.')
     return result
 
@@ -84,6 +85,9 @@ def validate_backup(payload, today):
         for k in ('principal','principalAtual','valorMensal','taxa','primeiraParcela'):
             if k in e and e[k] is not None:
                 entry[k]=numeric(e[k],0,100 if k=='taxa' else 100000000000)
+        for k in ('moraPct','multaPct'):
+            if k in e:
+                entry[k]=numeric(e[k],0,100)
         entry.setdefault('principal','0')
         entry.setdefault('valorMensal','0')
         entry.setdefault('taxa','0')
@@ -139,6 +143,23 @@ def validate_backup(payload, today):
         if key not in known:
             raise ValueError('Pagamento sem correspondência no cronograma.')
         result['recebimentosConfirmados'][key]=numeric(value,.01)
+    for e in result['emprestimos']:
+        details=originals[e['id']].get('encargosConfirmados',{})
+        valid_keys={r['key'] for r in schedule([e])}
+        if not isinstance(details,dict) or len(details)>480:
+            raise ValueError('Detalhamento de encargos inválido.')
+        snapshots={}
+        for key,snapshot in details.items():
+            if key not in valid_keys or key not in payments or not isinstance(snapshot,dict):
+                raise ValueError('Encargos sem recebimento correspondente.')
+            record={k:numeric(snapshot[k]) for k in ('base','multa','mora')}
+            record['data']=iso(snapshot['data'])
+            record['dias']=integer(snapshot['dias'],0,3660000)
+            if abs(sum(Decimal(record[k]) for k in ('base','multa','mora'))-Decimal(str(payments[key])))>Decimal('.01'):
+                raise ValueError('Total de encargos diferente do recebimento.')
+            snapshots[key]=record
+        if snapshots:
+            e['encargosConfirmados']=snapshots
     mapping={'CDB':'RF','Renda Fixa':'RF','Ações':'ACOES','Tesouro':'TESOURO','Previdência':'PREV'}
     for a in payload.get('aportes',[]):
         if not isinstance(a,dict):

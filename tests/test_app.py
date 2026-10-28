@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
-from app import create_app, schedule, monthly_receipts
+from app import create_app, schedule, monthly_receipts, late_charges
 from werkzeug.security import generate_password_hash
 
 
@@ -150,7 +150,7 @@ class FinanceTests(unittest.TestCase):
     def test_contract_and_contribution_workflows(self):
         self.login()
         token=self.csrf('/contrato/novo')
-        r=self.client.post('/contrato/novo',data={'csrf_token':token,'tomador':'Novo contrato','tipo':'PARCELADO','principal':'1000','valorMensal':'110','taxa':'0','parcelas':'10','inicio':'2026-01-31','risco':'baixo'})
+        r=self.client.post('/contrato/novo',data={'csrf_token':token,'moraPct':'0','multaPct':'0','tomador':'Novo contrato','tipo':'PARCELADO','principal':'1000','valorMensal':'110','taxa':'0','parcelas':'10','inicio':'2026-01-31','risco':'baixo'})
         self.assertEqual(r.status_code,302)
         backup=self.client.get('/exportar/json').json
         e=backup['emprestimos'][-1]
@@ -204,7 +204,7 @@ class FinanceTests(unittest.TestCase):
     def test_contract_edit_and_protected_terms_after_receipt(self):
         self.login()
         self.insert_loan()
-        values=dict(csrf_token=self.csrf('/contrato/90/editar'),tomador='Nome corrigido',apelido='Apelido',tipo='JUROS_COM_AMORTIZACAO',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas='3',inicio='2026-01-15',fim='2026-03-15',risco='medio')
+        values=dict(csrf_token=self.csrf('/contrato/90/editar'),moraPct='0',multaPct='0',tomador='Nome corrigido',apelido='Apelido',tipo='JUROS_COM_AMORTIZACAO',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas='3',inicio='2026-01-15',fim='2026-03-15',risco='medio')
         self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,302)
         with closing(sqlite3.connect(self.database)) as conn, conn:
             conn.execute('INSERT INTO payments VALUES (?,?,?)',('2026-01-90','20.00','2026-01-15'))
@@ -408,6 +408,85 @@ class FinanceTests(unittest.TestCase):
             with patch('quotes._currency_json',return_value=dict(base=base,quote='BRL',rate=rate,date='2026-01-01')):
                 with self.assertRaises(ValueError):
                     _fetch_reference_dollar()
+
+    def configure_late_fees(self, contract_id=90, mora='1', multa='2'):
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            e=json.loads(conn.execute('SELECT payload FROM contracts WHERE id=?',(contract_id,)).fetchone()[0])
+            e.update(moraPct=mora,multaPct=multa)
+            conn.execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),contract_id))
+
+    def test_late_fee_formula_single_fine_and_simple_daily_interest(self):
+        contract=dict(moraPct='1',multaPct='2')
+        for day,expected in [(date(2025,12,31),'1000.00'),(date(2026,1,1),'1000.00'),(date(2026,1,16),'1025.00'),(date(2026,1,31),'1030.00'),(date(2026,2,15),'1035.00')]:
+            charge=late_charges(contract,'1000','2026-01-01',day)
+            self.assertEqual(charge['amount'],Decimal(expected))
+        charge=late_charges(contract,'1000','2026-01-01',date(2026,1,31),'400')
+        self.assertEqual(charge['fine_amount'],Decimal('12.00'))
+        self.assertEqual(charge['late_interest'],Decimal('6.00'))
+        self.assertEqual(late_charges({},'1000','2026-01-01',date(2026,1,31))['amount'],1000)
+
+    def test_contract_missing_fee_warning_and_explicit_zero_configuration(self):
+        self.login()
+        self.insert_loan()
+        self.assertIn('Configuração de atraso incompleta'.encode(),self.client.get('/recebiveis').data)
+        values=dict(csrf_token=self.csrf('/contrato/90/editar'),tomador='Contrato sintético',tipo='JUROS_COM_AMORTIZACAO',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas='3',inicio='2026-01-15',fim='2026-03-15',risco='baixo')
+        self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,200)
+        values.update(moraPct='0',multaPct='0')
+        self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,302)
+        self.assertNotIn('Configuração de atraso incompleta'.encode(),self.client.get('/recebiveis').data)
+        values['moraPct']='NaN'
+        self.assertEqual(self.client.post('/contrato/90/editar',data=values).status_code,200)
+        self.assertEqual(self.client.get('/exportar/json').json['emprestimos'][0]['moraPct'],'0')
+
+    def test_confirmed_late_charges_freeze_backup_and_reversal(self):
+        self.login()
+        self.insert_loan()
+        self.configure_late_fees()
+        with patch('app.today',return_value=date(2026,1,30)):
+            token=self.csrf('/recebiveis')
+            self.assertIn(b'20,50',self.client.get('/recebiveis').data)
+            self.client.post('/pagamento',data=dict(csrf_token=token,key='2026-01-90'))
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados']['2026-01-90'],'20.50')
+            detail=backup['emprestimos'][0]['encargosConfirmados']['2026-01-90']
+            self.assertEqual(detail,dict(base='20.00',multa='0.40',mora='0.10',dias=15,data='2026-01-30'))
+            self.assertEqual(self.client.post('/dados',data={'csrf_token':token,'confirm':'SUBSTITUIR','backup':(io.BytesIO(json.dumps(backup).encode()),'backup.json')}).status_code,302)
+        with patch('app.today',return_value=date(2026,2,10)):
+            self.assertIn(b'20,50',self.client.get('/recebiveis').data)
+            self.client.post('/pagamento',data=dict(csrf_token=token,key='2026-01-90'))
+            self.assertEqual(self.client.get('/exportar/json').json['recebimentosConfirmados']['2026-01-90'],'20.50')
+            self.client.post('/pagamento',data=dict(csrf_token=token,key='2026-01-90',undo='1'))
+            self.assertIn(b'20,57',self.client.get('/recebiveis').data)
+            self.assertEqual(self.client.get('/exportar/json').json['emprestimos'][0].get('encargosConfirmados'),{})
+
+    def test_combined_payment_separates_late_charges_from_amortization(self):
+        self.login()
+        self.insert_loan()
+        self.configure_late_fees()
+        with patch('app.today',return_value=date(2026,1,30)):
+            token=self.csrf('/contrato/90/pagamento')
+            r=self.client.post('/contrato/90/pagamento',data=dict(csrf_token=token,key='2026-01-90',paid_on='2026-01-20',amount='120.43'))
+            self.assertEqual(r.status_code,302)
+            backup=self.client.get('/exportar/json').json
+            e=backup['emprestimos'][0]
+            self.assertEqual(e['principalAtual'],'900.00')
+            p=e['pagamentosExtras'][0]
+            self.assertEqual(p['juros'],'20.00')
+            self.assertEqual(p['multa'],'0.40')
+            self.assertEqual(p['mora'],'0.03')
+            self.assertEqual(p['valor'],'100.00')
+            self.assertEqual(backup['recebimentosConfirmados']['2026-01-90'],'20.43')
+            self.assertEqual(self.client.post('/dados',data={'csrf_token':token,'confirm':'SUBSTITUIR','backup':(io.BytesIO(json.dumps(backup).encode()),'backup.json')}).status_code,302)
+
+    def test_cheque_confirmation_includes_late_charges(self):
+        self.login()
+        self.insert_cheques()
+        self.configure_late_fees(80)
+        with patch('app.today',return_value=date(2027,1,25)):
+            self.client.post('/contrato/80/cheque',data=dict(csrf_token=self.csrf('/recebiveis'),key='2027-01-80-c0',status='paid'))
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados']['2027-01-80-c0'],'112.75')
+            self.assertEqual(backup['emprestimos'][0]['encargosConfirmados']['2027-01-80-c0']['dias'],15)
 
 
 if __name__=='__main__':

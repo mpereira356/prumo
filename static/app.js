@@ -68,19 +68,29 @@ if (paymentForm) {
   const installment = document.getElementById('payment-installment');
   const amount = document.getElementById('payment-amount');
   const principal = Math.round(Number(paymentForm.dataset.principal) * 100);
+  const paidDate = paymentForm.querySelector('[name="paid_on"]');
   const currency = new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
   function paymentPreview() {
     const interest = Math.round(Number(installment.selectedOptions[0].dataset.interest) * 100);
+    const due = Date.parse(installment.selectedOptions[0].dataset.due + 'T00:00:00Z');
+    const paid = Date.parse(paidDate.value + 'T00:00:00Z');
+    const days = Number.isFinite(paid) ? Math.max(0,Math.floor((paid-due)/86400000)) : 0;
+    const fine = days ? Math.round(interest * Number(paymentForm.dataset.multa) / 100) : 0;
+    const lateInterest = days ? Math.round(interest * Number(paymentForm.dataset.mora) * days / 3000) : 0;
+    const minimum = interest + fine + lateInterest;
     const value = Math.round(Number(amount.value || 0) * 100);
-    const reduction = Math.min(principal, Math.max(0, value - interest));
-    amount.min = (interest / 100).toFixed(2);
-    amount.max = ((interest + principal) / 100).toFixed(2);
+    const reduction = Math.min(principal, Math.max(0, value - minimum));
+    amount.min = (minimum / 100).toFixed(2);
+    amount.max = ((minimum + principal) / 100).toFixed(2);
     document.getElementById('preview-interest').textContent = currency.format(interest / 100);
+    document.getElementById('preview-fine').textContent = currency.format(fine / 100);
+    document.getElementById('preview-late-interest').textContent = currency.format(lateInterest / 100);
     document.getElementById('preview-reduction').textContent = currency.format(reduction / 100);
     document.getElementById('preview-balance').textContent = currency.format((principal - reduction) / 100);
   }
   installment.addEventListener('change', paymentPreview);
   amount.addEventListener('input', paymentPreview);
+  paidDate.addEventListener('change', paymentPreview);
   paymentPreview();
 }
 

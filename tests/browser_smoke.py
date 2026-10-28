@@ -7,12 +7,13 @@ import tempfile
 import threading
 import json
 import time
+from datetime import timedelta
 from contextlib import closing
 from pathlib import Path
 from werkzeug.security import generate_password_hash
 from werkzeug.serving import make_server
 from playwright.sync_api import sync_playwright, expect
-from app import create_app
+from app import create_app, today
 
 def main():
     with tempfile.TemporaryDirectory() as folder:
@@ -27,6 +28,9 @@ def main():
             conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9902,json.dumps(interest_contract)))
             cheques=dict(tomador='Cheques de teste',tipo='CHEQUES',status='ATIVO',risco='baixo',principal='330',inicio='2027-01-01',cheques=[dict(data='2027-01-10',valor='110'),dict(data='2027-01-20',valor='220')])
             conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9903,json.dumps(cheques)))
+            fee_due=(today()-timedelta(days=15)).isoformat()
+            fee_contract=dict(tomador='Contrato com encargos',tipo='PARCELADO',status='ATIVO',risco='baixo',principal='900',valorMensal='1000',parcelas=1,inicio=fee_due,fim=fee_due,moraPct='1',multaPct='2')
+            conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9904,json.dumps(fee_contract)))
         server=make_server('127.0.0.1',5058,app)
         thread=threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
@@ -80,6 +84,12 @@ def main():
                 history.get_by_role('button',name='Fechar histórico').click()
                 interest_card.get_by_role('link',name='Editar',exact=True).click()
                 assert page.get_by_label('Tomador / nome',exact=True).input_value()=='Juros de teste'
+                page.locator('[name="moraPct"]').fill('0')
+                page.locator('[name="multaPct"]').fill('0')
+                page.get_by_role('button',name='Salvar alterações',exact=True).click()
+                page.wait_for_url('**/recebiveis')
+                interest_card=page.locator('article.contract').filter(has=page.get_by_role('heading',name='Juros de teste',exact=True))
+                assert interest_card.locator('.charge-warning').count()==0
                 page.goto('http://127.0.0.1:5058/contrato/9902/pagamento')
                 page.get_by_label('Valor total recebido (R$)',exact=True).fill('120')
                 assert '100,00' in page.locator('#preview-reduction').inner_text()
@@ -132,6 +142,17 @@ def main():
                 cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
                 assert cheque_dialog.locator('tbody tr').first.locator('.badge').inner_text()=='No prazo'
                 page.screenshot(path='artifacts/cheques-mobile.png',full_page=True)
+                cheque_dialog.get_by_role('button',name='Fechar cronograma').click()
+                page.get_by_role('button',name='Ver cronograma de Contrato com encargos',exact=True).click()
+                fee_dialog=page.get_by_role('dialog',name='Contrato com encargos',exact=True)
+                assert '1.025,00' in fee_dialog.inner_text()
+                assert '20,00' in fee_dialog.inner_text() and '5,00' in fee_dialog.inner_text()
+                fee_dialog.get_by_role('button',name='Pagamento confirmado',exact=True).click()
+                page.wait_for_url('**/recebiveis#schedule-9904')
+                fee_dialog=page.get_by_role('dialog',name='Contrato com encargos',exact=True)
+                assert fee_dialog.locator('.badge').inner_text()=='Pago'
+                assert '1.025,00' in fee_dialog.inner_text()
+                page.screenshot(path='artifacts/late-charges-mobile.png',full_page=True)
                 page.route('**/api/dolar',lambda route:route.fulfill(json={'quote':{'bid':'5.2345','change':None,'timestamp':int(time.time()),'kind':'daily','source':'Frankfurter / BCE'},'stale':False,'source':'Frankfurter / BCE'}))
                 page.goto('http://127.0.0.1:5058/')
                 expect(page.locator('#dollar-value')).to_have_text('R$\u00a05,2345')

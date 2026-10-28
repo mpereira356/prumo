@@ -69,7 +69,23 @@ No cronograma de cheques pré-datados, cada cheque tem ações **Pagamento confi
 
 Todos os outros cronogramas também possuem **Pagamento confirmado** e **Desfazer pagamento** em cada parcela. Confirmações integrais podem ser antecipadas e mantêm a parcela no histórico como **Pago**. Em contratos de juros, esse botão confirma somente os juros previstos; para receber principal junto, utilize **Registrar pagamento**. Recebimentos vinculados a amortizações devem ser desfeitos pelo histórico do contrato.
 
-Contratos com pagamentos preservam suas condições financeiras durante a edição: apenas nome, apelido, risco e observações podem ser corrigidos livremente. Para corrigir condições de um contrato pago, revise e desfaça os pagamentos aplicáveis antes. A exclusão remove o contrato e seus recebimentos após confirmação; exporte backup antes. A importação do HTML mais recente preserva os campos de juros, amortização, saldo anterior e posterior no histórico. Recebimentos parciais legados são indicados como parciais.
+### Multa e juros de mora
+
+Ao criar ou editar um contrato, informe **Juros de mora por mês (%)** e **Multa por atraso (%)**. Os valores são os percentuais contratados pelo usuário; não há taxa preenchida automaticamente. Informe `0` para não cobrar um encargo. Contratos antigos sem um dos campos exibem um aviso no cartão, com atalho para completar a configuração. As condições originais permanecem protegidas após pagamentos, mas mora e multa podem ser configuradas para as parcelas ainda pendentes.
+
+Após o vencimento, calcula-se sobre o saldo base pendente da parcela:
+
+- Multa única = saldo pendente × percentual de multa ÷ 100.
+- Mora simples = saldo pendente × percentual mensal de mora × dias corridos de atraso ÷ 3000.
+- Total atualizado = valor base + multa + mora; sem capitalização e sem juros sobre os próprios encargos.
+
+No dia do vencimento não há encargos. Exemplo matemático: parcela de R$ 1.000, multa de 2% e mora mensal de 1%, com 15 dias de atraso, totaliza R$ 1.025. Esse exemplo apenas explica a fórmula e não recomenda percentuais.
+
+Os valores são recalculados na consulta ao painel, usando a data de Brasília, e aparecem discriminados no cronograma, no fluxo e nos totais. Configurar taxas em contrato antigo atualiza parcelas pendentes já vencidas desde seu vencimento, sem alterar recebimentos anteriormente confirmados. A marcação manual de cheque como **No prazo** altera somente a situação informada; não muda o vencimento nem suspende encargos.
+
+Ao confirmar um pagamento, seus encargos são fixados e deixam de aumentar. Desfazer a confirmação reabre a parcela e recalcula o atraso até a data atual. O registro combinado de juros/amortização calcula multa e mora até a **data do pagamento informada**, cobra os encargos primeiro e usa somente o excedente para amortizar o principal. Backup e importação preservam taxas, valores pagos e detalhamento dos encargos.
+
+Contratos com pagamentos preservam suas condições financeiras durante a edição: nome, apelido, risco e observações podem ser corrigidos; mora e multa podem ser configuradas para parcelas pendentes. Para corrigir condições de um contrato pago, revise e desfaça os pagamentos aplicáveis antes. A exclusão remove o contrato e seus recebimentos após confirmação; exporte backup antes. A importação do HTML mais recente preserva os campos de juros, amortização, saldo anterior e posterior no histórico. Recebimentos parciais legados são indicados como parciais.
 
 O botão **Cotações B3** requer `BRAPI_TOKEN` no ambiente e plano compatível com consultas em lote. Aceita uma tentativa a cada cinco minutos e preserva preços sem resposta. Foi testado com respostas simuladas; consultas reais exigem sua credencial. Use uma chave nova: a chave do HTML antigo precisa ser revogada. [Documentação oficial da brapi](https://brapi.dev/docs/examples/python).
 
