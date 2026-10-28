@@ -93,6 +93,14 @@ O dólar consulta primeiro o preço de compra comercial da [AwesomeAPI](https://
 
 As consultas passam pelo servidor, usam destinos fixos, timeout e cache persistente compartilhado de cinco minutos. O horário da AwesomeAPI é o da negociação convertido para Brasília; referências diárias mostram apenas a data. Se ambas as fontes falharem, mantém o último valor disponível e tenta novamente após um minuto, em vez de esperar cinco minutos. Sem valor anterior, informa indisponibilidade. Os provedores podem servir dados em cache; não representa cotação de turismo nem preço garantido para operação.
 
+## Desfazer alterações
+
+Após salvar, excluir ou confirmar alterações financeiras importantes, aparece no canto inferior direito uma barra de cinco segundos com **Desfazer**. Inclui posições, contratos, pagamentos, amortizações, situações de cheques, metas, aportes, atualização das cotações B3 e importações. Alterações sem mudança de dados não criam outra reversão. Login, senhas, tema e consultas do dólar não participam dessa função.
+
+A janela começa na primeira exibição após a ação; navegar ou recarregar não reinicia a contagem. O prazo também é validado no servidor. A reversão exige a mesma conta e sessão, proteção CSRF e que nenhum dado financeiro tenha mudado desde a ação. Se outra alteração ocorrer, o servidor recusa a reversão antiga para preservar os dados mais recentes. A barra funciona também com o cronograma aberto no celular.
+
+O estado anterior é guardado temporariamente no SQLite, sem enviar dados financeiros ao cookie ou ao Git. Registros expirados são limpos nas próximas ações/exibições da barra. Essa janela curta complementa as confirmações e os backups, sem substituí-los.
+
 ## Configuração e segurança
 
 `.env.example` documenta as variáveis; não é carregado automaticamente. Em produção, configure `APP_ENV=production`, uma `SECRET_KEY` aleatória persistente de pelo menos 32 caracteres, `TRUSTED_HOSTS` e `PRUMO_INSTANCE_PATH`. Não gere outra chave a cada atualização.

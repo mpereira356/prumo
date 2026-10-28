@@ -152,6 +152,18 @@ def main():
                 fee_dialog=page.get_by_role('dialog',name='Contrato com encargos',exact=True)
                 assert fee_dialog.locator('.badge').inner_text()=='Pago'
                 assert '1.025,00' in fee_dialog.inner_text()
+                expect(page.locator('#undo-toast')).to_be_visible()
+                assert fee_dialog.locator('#undo-toast').count()==1
+                page.locator('#undo-form').get_by_role('button',name='Desfazer',exact=True).click()
+                page.wait_for_url('**/recebiveis')
+                expect(page.locator('#undo-toast')).to_have_count(0)
+                page.get_by_role('button',name='Ver cronograma de Contrato com encargos',exact=True).click()
+                fee_dialog=page.get_by_role('dialog',name='Contrato com encargos',exact=True)
+                assert fee_dialog.locator('.badge').inner_text()!='Pago'
+                fee_dialog.get_by_role('button',name='Pagamento confirmado',exact=True).click()
+                page.wait_for_url('**/recebiveis#schedule-9904')
+                expect(page.locator('#undo-toast')).to_be_visible()
+                expect(page.locator('#undo-toast')).to_have_count(0,timeout=6500)
                 page.screenshot(path='artifacts/late-charges-mobile.png',full_page=True)
                 page.route('**/api/dolar',lambda route:route.fulfill(json={'quote':{'bid':'5.2345','change':None,'timestamp':int(time.time()),'kind':'daily','source':'Frankfurter / BCE'},'stale':False,'source':'Frankfurter / BCE'}))
                 page.goto('http://127.0.0.1:5058/')

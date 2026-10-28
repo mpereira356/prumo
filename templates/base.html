@@ -13,4 +13,5 @@
 {% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="notice {{ category }}" role="status">{{ message }}</div>{% endfor %}{% endwith %}
 {% block content %}{% endblock %}
 </main>{% if current_user %}<footer>Prumo <span>Seu patrimônio na direção certa.</span><a href="{{ url_for('data_management') }}">Backup e migração ↗</a></footer>{% endif %}</div>
+{% if current_user and undo_notice %}<aside id="undo-toast" class="undo-toast" role="status" aria-live="polite" data-remaining-ms="{{ undo_notice.remaining_ms }}"><div class="undo-toast-content"><div><strong>{{ undo_notice.label }}</strong><small>Você pode desfazer por <span id="undo-countdown" aria-hidden="true">5</span> segundos.</small></div><form id="undo-form" method="post" action="{{ url_for('undo_change') }}">{{ csrf() }}<input type="hidden" name="token" value="{{ undo_notice.token }}"><button type="submit" class="undo-button">Desfazer</button></form></div><progress id="undo-progress" max="5000" value="{{ undo_notice.remaining_ms }}" aria-label="Tempo restante para desfazer"></progress></aside>{% endif %}
 </body></html>

@@ -19,6 +19,7 @@ from flask import Flask, abort, flash, g, redirect, render_template, request, se
 from flask_wtf.csrf import CSRFProtect, CSRFError
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import SecurityError
+from undo import snapshot, fingerprint, restore
 
 ROOT = Path(__file__).resolve().parent
 CLASSES = {'ACOES': 'Ações', 'FIIs': 'Fundos imobiliários', 'TESOURO': 'Tesouro Direto', 'RF': 'Renda fixa', 'PREV': 'Previdência', 'BDR': 'BDRs', 'ETF': 'ETFs', 'COE': 'COE'}
@@ -154,6 +155,7 @@ def create_app(test_config=None):
         CREATE INDEX IF NOT EXISTS attempts_bucket ON attempts(bucket, stamp);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, user_id INTEGER, action TEXT NOT NULL, stamp TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS exchange_rates(pair TEXT PRIMARY KEY, payload TEXT, attempted REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS undo_actions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, session_hash TEXT NOT NULL, label TEXT NOT NULL, before_state TEXT NOT NULL, after_hash TEXT NOT NULL, created REAL NOT NULL, activated REAL, expires REAL NOT NULL, destination TEXT NOT NULL);
         ''')
         if not db().execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
             seed=ROOT/'data/initial.json'
@@ -165,8 +167,45 @@ def create_app(test_config=None):
             db().executemany('INSERT INTO settings VALUES (?,?)', [('initialized','1'),('goal','300000'),('rate','0.8')])
             db().commit()
 
+    def begin_change():
+        if not db().in_transaction:
+            db().execute('BEGIN IMMEDIATE')
+        if 'undo_before' not in g:
+            db().execute('DELETE FROM undo_actions WHERE expires<?',(time.time(),))
+            g.undo_before=snapshot(db())
+
     def audit(action):
         db().execute('INSERT INTO audit(user_id,action,stamp) VALUES (?,?,?)', (g.user['id'] if g.user else None, action, datetime.now().isoformat()))
+        if g.get('undo_before') is not None and g.get('user'):
+            after=snapshot(db())
+            if after!=g.undo_before:
+                labels={'asset_saved':'Posição salva','asset_deleted':'Posição excluída','contract_created':'Contrato criado','contract_updated':'Contrato alterado','contract_deleted':'Contrato excluído','cheque_status_paid':'Pagamento do cheque confirmado','cheque_status_late':'Cheque marcado em atraso','cheque_status_on_time':'Situação do cheque alterada','contract_payment_registered':'Pagamento registrado','contract_payment_reversed':'Pagamento desfeito','principal_amortized':'Amortização registrada','payment_confirmed':'Recebimento confirmado','payment_reversed':'Recebimento desfeito','goals_updated':'Meta alterada','contribution_added':'Aporte registrado','backup_imported':'Backup importado','quotes_refreshed':'Cotações atualizadas'}
+                destination='portfolio' if action.startswith('asset_') or action=='quotes_refreshed' else 'goals' if action in ('goals_updated','contribution_added') else 'dashboard' if action=='backup_imported' else 'receivables'
+                token=secrets.token_urlsafe(32)
+                now=time.time()
+                session_hash=hashlib.sha256(session['token'].encode()).hexdigest()
+                db().execute('INSERT INTO undo_actions VALUES (?,?,?,?,?,?,?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),g.user['id'],session_hash,labels.get(action,'Alteração salva'),g.undo_before,fingerprint(after),now,None,now+60,url_for(destination)))
+                session['undo_token']=token
+
+    def undo_notice():
+        if request.method!='GET' or not g.get('user') or not session.get('undo_token'):
+            return None
+        token=session['undo_token']
+        conn=db()
+        conn.execute('BEGIN IMMEDIATE')
+        now=time.time()
+        conn.execute('DELETE FROM undo_actions WHERE expires<?',(now,))
+        entry=conn.execute('SELECT * FROM undo_actions WHERE token=? AND user_id=? AND session_hash=?',(hashlib.sha256(token.encode()).hexdigest(),g.user['id'],hashlib.sha256(session['token'].encode()).hexdigest())).fetchone()
+        if not entry or fingerprint(snapshot(conn))!=entry['after_hash']:
+            conn.commit()
+            session.pop('undo_token',None)
+            return None
+        expires=entry['expires']
+        if entry['activated'] is None:
+            expires=now+5
+            conn.execute('UPDATE undo_actions SET activated=?,expires=? WHERE token=?',(now,expires,entry['token']))
+        conn.commit()
+        return dict(token=token,label=entry['label'],remaining_ms=max(0,int((expires-now)*1000)))
 
     def limited(bucket, limit, seconds):
         now = time.time()
@@ -219,7 +258,37 @@ def create_app(test_config=None):
 
     @app.context_processor
     def context():
-        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat())
+        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat(),undo_notice=undo_notice())
+
+    @app.post('/desfazer')
+    @protected
+    def undo_change():
+        token=request.form.get('token','')
+        conn=db()
+        conn.execute('BEGIN IMMEDIATE')
+        entry=conn.execute('SELECT * FROM undo_actions WHERE token=? AND user_id=? AND session_hash=?',(hashlib.sha256(token.encode()).hexdigest(),g.user['id'],hashlib.sha256(session['token'].encode()).hexdigest())).fetchone()
+        if not entry:
+            conn.rollback()
+            flash('Esta ação não está mais disponível para desfazer.','error')
+            return redirect(url_for('dashboard'))
+        destination=entry['destination']
+        if entry['activated'] is None or time.time()>entry['expires']:
+            conn.execute('DELETE FROM undo_actions WHERE token=?',(entry['token'],))
+            conn.commit()
+            flash('O prazo de cinco segundos para desfazer terminou.','error')
+            return redirect(destination)
+        if fingerprint(snapshot(conn))!=entry['after_hash']:
+            conn.execute('DELETE FROM undo_actions WHERE token=?',(entry['token'],))
+            conn.commit()
+            flash('Houve outra alteração depois desta ação. A reversão foi bloqueada para preservar os dados mais recentes.','error')
+            return redirect(destination)
+        restore(conn,entry['before_state'])
+        conn.execute('DELETE FROM undo_actions WHERE token=?',(entry['token'],))
+        audit('change_undone')
+        conn.commit()
+        session.pop('undo_token',None)
+        flash('Ação desfeita. Os dados anteriores foram restaurados.','success')
+        return redirect(destination)
 
     @app.get('/api/dolar')
     def dollar_quote():
@@ -417,6 +486,8 @@ def create_app(test_config=None):
         try:
             from quotes import fetch_quotes
             prices=fetch_quotes([a['ticker'].upper() for a in assets],token)
+            begin_change()
+            assets=[a for a in records('assets') if a['classe'] in ('ACOES','FIIs','BDR','ETF')]
             count=0
             for a in assets:
                 if a['ticker'].upper() in prices:
@@ -450,6 +521,7 @@ def create_app(test_config=None):
                     a[k]=str(number(request.form.get(k),Decimal('.000001') if k=='qtd' else 0))
                 a['valor']=str(money(Decimal(a['qtd'])*Decimal(a['atual'])))
                 a['updated_at']=today().isoformat()
+                begin_change()
                 if asset_id:
                     db().execute('UPDATE assets SET payload=? WHERE id=?',(json.dumps(a),asset_id))
                 else:
@@ -466,6 +538,7 @@ def create_app(test_config=None):
     @app.post('/ativo/<int:asset_id>/excluir')
     @protected
     def delete_asset(asset_id):
+        begin_change()
         db().execute('DELETE FROM assets WHERE id=?',(asset_id,))
         audit('asset_deleted')
         db().commit()
@@ -498,7 +571,7 @@ def create_app(test_config=None):
             abort(404)
         if request.method=='POST':
             try:
-                db().execute('BEGIN IMMEDIATE')
+                begin_change()
                 if contract_id:
                     original=next(e for e in records('contracts') if e['id']==contract_id)
                 e=dict(original or {})
@@ -584,7 +657,7 @@ def create_app(test_config=None):
     @app.post('/contrato/<int:contract_id>/excluir')
     @protected
     def delete_contract(contract_id):
-        db().execute('BEGIN IMMEDIATE')
+        begin_change()
         e=next((e for e in records('contracts') if e['id']==contract_id),None)
         if not e:
             abort(404)
@@ -600,7 +673,7 @@ def create_app(test_config=None):
     @app.post('/contrato/<int:contract_id>/cheque')
     @protected
     def cheque_status(contract_id):
-        db().execute('BEGIN IMMEDIATE')
+        begin_change()
         data=financial()
         e=next((e for e in data['contracts'] if e['id']==contract_id and e['tipo']=='CHEQUES'),None)
         if not e:
@@ -636,7 +709,7 @@ def create_app(test_config=None):
         choices=[r for r in data['rows'] if r['contract']==contract_id and not r['settled'] and r['due']<=today().isoformat()]
         if request.method=='POST':
             try:
-                db().execute('BEGIN IMMEDIATE')
+                begin_change()
                 data=financial()
                 e=next(e for e in data['contracts'] if e['id']==contract_id)
                 row=next((r for r in data['rows'] if r['contract']==contract_id and r['key']==request.form.get('key') and not r['settled'] and r['due']<=today().isoformat()),None)
@@ -671,7 +744,7 @@ def create_app(test_config=None):
     @app.post('/contrato/<int:contract_id>/historico/desfazer')
     @protected
     def reverse_contract_payment(contract_id):
-        db().execute('BEGIN IMMEDIATE')
+        begin_change()
         e=next((e for e in records('contracts') if e['id']==contract_id),None)
         if not e:
             abort(404)
@@ -697,7 +770,7 @@ def create_app(test_config=None):
     @app.post('/contrato/<int:contract_id>/amortizar')
     @protected
     def amortize(contract_id):
-        db().execute('BEGIN IMMEDIATE')
+        begin_change()
         e=next((e for e in records('contracts') if e['id']==contract_id),None)
         if not e or e['tipo'] not in ('JUROS_COM_AMORTIZACAO','JUROS_MENSAIS'):
             abort(404)
@@ -732,7 +805,7 @@ def create_app(test_config=None):
     @app.post('/pagamento')
     @protected
     def payment():
-        db().execute('BEGIN IMMEDIATE')
+        begin_change()
         key=request.form.get('key','')
         data=financial()
         row=next((r for r in data['rows'] if r['key']==key),None)
@@ -747,11 +820,12 @@ def create_app(test_config=None):
                 return redirect(url_for('receivables'))
             db().execute('DELETE FROM payments WHERE key=?',(key,))
             e.get('encargosConfirmados',{}).pop(key,None)
-            audit('payment_reversed')
+            action='payment_reversed'
         else:
             record_receipt(e,row,today())
-            audit('payment_confirmed')
+            action='payment_confirmed'
         db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),e['id']))
+        audit(action)
         db().commit()
         flash('Recebimento atualizado.','success')
         return redirect(destination)
@@ -763,6 +837,7 @@ def create_app(test_config=None):
             try:
                 goal=number(request.form.get('goal'),1)
                 rate=number(request.form.get('rate'),0,10)
+                begin_change()
                 db().executemany('UPDATE settings SET value=? WHERE key=?',[(str(goal),'goal'),(str(rate),'rate')])
                 audit('goals_updated')
                 db().commit()
@@ -785,6 +860,7 @@ def create_app(test_config=None):
             category=request.form.get('category','RF')
             if category not in CLASSES or d>today():
                 raise ValueError('Classe ou data inválida.')
+            begin_change()
             db().execute('INSERT INTO contributions(amount,day,category) VALUES (?,?,?)',(str(value),d.isoformat(),category))
             audit('contribution_added')
             db().commit()
@@ -805,6 +881,7 @@ def create_app(test_config=None):
                     raise ValueError('Selecione o backup JSON.')
                 from validation import validate_backup
                 backup=validate_backup(json.loads(upload.read()), today())
+                begin_change()
                 # Valida tudo antes de iniciar a substituição atômica.
                 for table in ('assets','contracts','payments','contributions'):
                     db().execute(f'DELETE FROM {table}')

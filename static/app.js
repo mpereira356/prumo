@@ -37,15 +37,22 @@ function showCheque() { const field = document.getElementById('cheque-field'); i
 type?.addEventListener('change', showCheque);
 if (type) showCheque();
 
+function placeUndoToast(dialog) {
+  const toast = document.getElementById('undo-toast');
+  if (toast) dialog.appendChild(toast);
+}
+
 document.querySelectorAll('[data-schedule-dialog]').forEach(button => {
   button.addEventListener('click', () => {
     const dialog = document.getElementById(button.dataset.scheduleDialog);
-    if (dialog && !dialog.open) dialog.showModal();
+    if (dialog && !dialog.open) { placeUndoToast(dialog); dialog.showModal(); }
   });
 });
 document.querySelectorAll('.schedule-dialog').forEach(dialog => {
   dialog.querySelector('[data-dialog-close]').addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => {
+    const toast = dialog.querySelector('#undo-toast');
+    if (toast) document.body.appendChild(toast);
     const opener = [...document.querySelectorAll('[data-schedule-dialog]')].find(button => button.dataset.scheduleDialog === dialog.id);
     opener?.focus({preventScroll:true});
   });
@@ -58,10 +65,31 @@ function openScheduleFromHash() {
   const id = location.hash.slice(1);
   if (!/^schedule-\d+$/.test(id)) return;
   const dialog = document.getElementById(id);
-  if (dialog?.matches('dialog.schedule-dialog') && !dialog.open) dialog.showModal();
+  if (dialog?.matches('dialog.schedule-dialog') && !dialog.open) { placeUndoToast(dialog); dialog.showModal(); }
 }
 openScheduleFromHash();
 window.addEventListener('hashchange', openScheduleFromHash);
+
+const undoToast = document.getElementById('undo-toast');
+if (undoToast) {
+  const progress = document.getElementById('undo-progress');
+  const countdown = document.getElementById('undo-countdown');
+  const navigation = performance.getEntriesByType('navigation')[0];
+  const elapsed = navigation ? Math.max(0,performance.now()-navigation.responseStart) : 0;
+  const deadline = performance.now() + Math.max(0,Number(undoToast.dataset.remainingMs)-elapsed);
+  let submitting = false;
+  document.getElementById('undo-form').addEventListener('submit', () => { submitting = true; });
+  function updateUndo() {
+    if (submitting) return;
+    const remaining = Math.max(0,deadline-performance.now());
+    progress.value = remaining;
+    countdown.textContent = String(Math.ceil(remaining/1000));
+    if (remaining <= 0) { undoToast.remove(); return; }
+    requestAnimationFrame(updateUndo);
+  }
+  requestAnimationFrame(updateUndo);
+  window.addEventListener('pageshow',event => { if (event.persisted) updateUndo(); });
+}
 
 const paymentForm = document.getElementById('combined-payment');
 if (paymentForm) {
