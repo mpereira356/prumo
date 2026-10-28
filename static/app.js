@@ -86,7 +86,7 @@ if (paymentForm) {
 
 const dollar = document.getElementById('dollar-quote');
 if (dollar) {
-  let fetching = false;
+  let fetching = false, retryTimer;
   const value = document.getElementById('dollar-value');
   const change = document.getElementById('dollar-change');
   const status = document.getElementById('dollar-status');
@@ -94,25 +94,44 @@ if (dollar) {
   async function refreshDollar() {
     if (fetching || document.hidden) return;
     fetching = true;
+    clearTimeout(retryTimer);
+    let delay = 300000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
     try {
-      const response = await fetch(dollar.dataset.url, {headers:{Accept:'application/json'}});
+      const response = await fetch(dollar.dataset.url, {headers:{Accept:'application/json'},cache:'no-store',signal:controller.signal});
       const data = await response.json();
+      delay = data.retry_after === 60 ? 60000 : 300000;
+      if (response.status === 401) { status.textContent = 'Sessão expirada · entre novamente'; return; }
       if (!response.ok || !data.quote) throw new Error('unavailable');
-      const bid = Number(data.quote.bid), variation = Number(data.quote.change);
-      if (!Number.isFinite(bid) || !Number.isFinite(variation)) throw new Error('invalid');
+      const bid = Number(data.quote.bid);
+      const variation = data.quote.change == null ? null : Number(data.quote.change);
+      if (!Number.isFinite(bid) || bid <= 0 || (variation != null && !Number.isFinite(variation))) throw new Error('invalid');
       value.textContent = format.format(bid);
-      change.textContent = `${variation >= 0 ? '+' : ''}${variation.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}%`;
-      change.className = variation >= 0 ? 'positive' : 'negative';
+      change.hidden = variation == null;
+      change.textContent = variation == null ? '' : `${variation >= 0 ? '+' : ''}${variation.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}%`;
+      change.className = variation != null && variation < 0 ? 'negative' : 'positive';
       const date = new Date(data.quote.timestamp * 1000);
-      const stamp = new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(date);
-      status.textContent = `${data.stale ? 'Última cotação' : 'Cotação'}: ${stamp} · Brasília`;
-      dollar.title = `Dólar comercial · compra · AwesomeAPI. ${data.stale ? 'Valor desatualizado ou provedor indisponível.' : 'Consulta a cada 5 minutos.'}`;
+      const source = data.source || data.quote.source || 'AwesomeAPI';
+      if (data.quote.kind === 'daily') {
+        const stamp = new Intl.DateTimeFormat('pt-BR',{timeZone:'UTC',day:'2-digit',month:'2-digit',year:'numeric'}).format(date);
+        status.textContent = `${data.stale ? 'Última referência' : 'Referência diária'}: ${stamp}`;
+        dollar.title = `Fonte: ${source}. Referência diária do BCE, sem variação intradiária. A fonte principal está temporariamente indisponível.`;
+      } else {
+        const stamp = new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(date);
+        status.textContent = `${data.stale ? 'Última cotação' : 'Cotação'}: ${stamp} · Brasília`;
+        dollar.title = `Dólar comercial · compra · ${source}. ${data.stale ? 'Último valor salvo; aguardando atualização.' : 'Consulta a cada 5 minutos.'}`;
+      }
     } catch (_) {
-      if (value.textContent === '—') status.textContent = 'Cotação indisponível';
-      else status.textContent = 'Último valor · sem atualização';
-    } finally { fetching = false; }
+      delay = 60000;
+      status.textContent = value.textContent === '—' ? 'Consultas indisponíveis · nova tentativa em 1 min' : 'Último valor · nova tentativa em 1 min';
+    } finally {
+      clearTimeout(timeout);
+      fetching = false;
+      retryTimer = setTimeout(refreshDollar, delay);
+    }
   }
   refreshDollar();
-  setInterval(refreshDollar, 300000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshDollar(); });
 }
+

@@ -222,7 +222,8 @@ def create_app(test_config=None):
         conn.execute('BEGIN IMMEDIATE')
         cached=conn.execute("SELECT * FROM exchange_rates WHERE pair='USD-BRL'").fetchone()
         quote=json.loads(cached['payload']) if cached and cached['payload'] else None
-        refresh=not cached or now-cached['attempted']>=300
+        retry_after=60 if not quote or quote.get('refresh_failed') else 300
+        refresh=not cached or now-cached['attempted']>=retry_after
         if refresh:
             conn.execute("INSERT INTO exchange_rates(pair,payload,attempted) VALUES ('USD-BRL',NULL,?) ON CONFLICT(pair) DO UPDATE SET attempted=excluded.attempted",(now,))
         conn.commit()
@@ -233,18 +234,19 @@ def create_app(test_config=None):
                 quote=fetch_dollar()
                 conn.execute("UPDATE exchange_rates SET payload=? WHERE pair='USD-BRL'",(json.dumps(quote),))
                 conn.commit()
-            except Exception:
+            except Exception as error:
                 conn.rollback()
                 failed=True
+                app.logger.warning('Provedores de dólar indisponíveis (%s).',type(error).__name__)
                 if quote:
                     quote['refresh_failed']=True
                     conn.execute("UPDATE exchange_rates SET payload=? WHERE pair='USD-BRL'",(json.dumps(quote),))
                     conn.commit()
         if not quote:
-            return jsonify(quote=None,stale=True,error='Cotação indisponível.'),503
+            return jsonify(quote=None,stale=True,retry_after=60,error='Cotação indisponível.'),503
         # Timestamp da negociação, nunca o horário local da consulta.
-        stale=failed or quote.get('refresh_failed',False) or now-quote['timestamp']>900
-        return jsonify(quote=quote,stale=stale,source='AwesomeAPI')
+        stale=failed or quote.get('refresh_failed',False) or now-quote['timestamp']>(7*86400 if quote.get('kind')=='daily' else 900)
+        return jsonify(quote=quote,stale=stale,source=quote.get('source','AwesomeAPI'),retry_after=60 if failed or quote.get('refresh_failed') else 300)
 
     @app.cli.command('create-admin')
     @click.option('--username', prompt='Usuário')

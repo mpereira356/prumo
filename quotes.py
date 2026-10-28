@@ -3,6 +3,8 @@ import json
 import re
 import urllib.request
 import time
+import os
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -28,16 +30,38 @@ def fetch_quotes(symbols, token):
             prices[symbol]=str(price)
     return prices
 
-def fetch_dollar():
-    req=urllib.request.Request('https://economia.awesomeapi.com.br/json/last/USD-BRL',headers={'Accept':'application/json','User-Agent':'Prumo/1.0'})
-    with urllib.request.build_opener(NoRedirect()).open(req,timeout=5) as response:
+def _currency_json(url, extra_headers=None):
+    headers={'Accept':'application/json','User-Agent':'Prumo/1.0'}
+    headers.update(extra_headers or {})
+    req=urllib.request.Request(url,headers=headers)
+    with urllib.request.build_opener(NoRedirect()).open(req,timeout=4) as response:
         raw=response.read(65537)
         if len(raw)>65536:
             raise ValueError('Resposta muito grande.')
-        item=json.loads(raw)['USDBRL']
+        return json.loads(raw)
+
+def _fetch_awesome_dollar():
+    key=os.environ.get('AWESOMEAPI_TOKEN')
+    item=_currency_json('https://economia.awesomeapi.com.br/json/last/USD-BRL',{'x-api-key':key} if key else None)['USDBRL']
     bid=Decimal(str(item['bid']))
     change=Decimal(str(item['pctChange']))
     timestamp=int(item['timestamp'])
     if not bid.is_finite() or not 0<bid<1000000 or not change.is_finite() or abs(change)>1000 or not 0<timestamp<=time.time()+300:
         raise ValueError('Cotação inválida.')
-    return {'bid':str(bid),'change':str(change),'timestamp':timestamp}
+    return {'bid':str(bid),'change':str(change),'timestamp':timestamp,'source':'AwesomeAPI','kind':'intraday'}
+
+def _fetch_reference_dollar():
+    item=_currency_json('https://api.frankfurter.dev/v2/providers/ecb/rate/USD/BRL')
+    bid=Decimal(str(item['rate']))
+    day=date.fromisoformat(item['date'])
+    if item.get('base')!='USD' or item.get('quote')!='BRL' or not bid.is_finite() or not 0<bid<1000000 or day>datetime.now(timezone.utc).date():
+        raise ValueError('Referência diária inválida.')
+    timestamp=int(datetime(day.year,day.month,day.day,tzinfo=timezone.utc).timestamp())
+    return dict(bid=str(bid),change=None,timestamp=timestamp,date=day.isoformat(),source='Frankfurter / BCE',kind='daily')
+
+def fetch_dollar():
+    try:
+        return _fetch_awesome_dollar()
+    except Exception:
+        # Referência diária explicitamente identificada; não simula preço intradiário.
+        return _fetch_reference_dollar()

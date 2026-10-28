@@ -377,6 +377,38 @@ class FinanceTests(unittest.TestCase):
             self.client.post('/pagamento',data=dict(data,undo='1'))
             self.assertNotIn(data['key'],self.client.get('/exportar/json').json['recebimentosConfirmados'])
 
+    def test_dollar_uses_daily_reference_when_primary_fails(self):
+        self.login()
+        reference=dict(bid='5.12',change=None,timestamp=int(time.time()),date=date.today().isoformat(),source='Frankfurter / BCE',kind='daily')
+        with patch('quotes._fetch_awesome_dollar',side_effect=OSError('rate limited')),patch('quotes._fetch_reference_dollar',return_value=reference) as fallback:
+            r=self.client.get('/api/dolar')
+            self.assertEqual(r.status_code,200)
+            self.assertEqual(r.json['source'],'Frankfurter / BCE')
+            self.assertEqual(r.json['quote']['kind'],'daily')
+            self.assertIsNone(r.json['quote']['change'])
+            fallback.assert_called_once()
+
+    def test_dollar_failure_retries_after_one_minute(self):
+        self.login()
+        with patch('quotes.fetch_dollar',side_effect=OSError('offline')):
+            r=self.client.get('/api/dolar')
+            self.assertEqual(r.json['retry_after'],60)
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('UPDATE exchange_rates SET attempted=?',(time.time()-61,))
+        quote=dict(bid='5.1',change='0.2',timestamp=int(time.time()),source='AwesomeAPI')
+        with patch('quotes.fetch_dollar',return_value=quote) as provider:
+            r=self.client.get('/api/dolar')
+            self.assertEqual(r.status_code,200)
+            self.assertEqual(r.json['retry_after'],300)
+            provider.assert_called_once()
+
+    def test_daily_reference_validates_pair_and_numeric_value(self):
+        from quotes import _fetch_reference_dollar
+        for base,rate in [('EUR','5'),('USD','NaN'),('USD','-1')]:
+            with patch('quotes._currency_json',return_value=dict(base=base,quote='BRL',rate=rate,date='2026-01-01')):
+                with self.assertRaises(ValueError):
+                    _fetch_reference_dollar()
+
 
 if __name__=='__main__':
     unittest.main()

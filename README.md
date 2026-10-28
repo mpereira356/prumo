@@ -73,7 +73,9 @@ Contratos com pagamentos preservam suas condições financeiras durante a ediç�
 
 O botão **Cotações B3** requer `BRAPI_TOKEN` no ambiente e plano compatível com consultas em lote. Aceita uma tentativa a cada cinco minutos e preserva preços sem resposta. Foi testado com respostas simuladas; consultas reais exigem sua credencial. Use uma chave nova: a chave do HTML antigo precisa ser revogada. [Documentação oficial da brapi](https://brapi.dev/docs/examples/python).
 
-O dólar usa o preço de compra comercial da [AwesomeAPI](https://docs.awesomeapi.com.br/api-de-moedas), sem depender da chave brapi. As consultas passam pelo servidor, têm timeout e cache compartilhado persistente de cinco minutos. O horário exibido é o da negociação informado pelo provedor, convertido para Brasília. Em falhas, mantém a última cotação e indica falta de atualização; sem valor anterior, informa indisponibilidade. O provedor pode servir dados em cache; não representa cotação de turismo nem preço garantido para operação.
+O dólar consulta primeiro o preço de compra comercial da [AwesomeAPI](https://docs.awesomeapi.com.br/api-de-moedas), sem depender da chave brapi. A variável opcional `AWESOMEAPI_TOKEN` autentica essa consulta pelo cabeçalho `x-api-key` e permite utilizar os limites da sua conta. Se a fonte principal falhar ou atingir o limite de requisições, consulta automaticamente a [Frankfurter](https://frankfurter.dev/) para obter a referência diária do Banco Central Europeu, identificada na tela como **Referência diária**, sem inventar variação percentual intradiária.
+
+As consultas passam pelo servidor, usam destinos fixos, timeout e cache persistente compartilhado de cinco minutos. O horário da AwesomeAPI é o da negociação convertido para Brasília; referências diárias mostram apenas a data. Se ambas as fontes falharem, mantém o último valor disponível e tenta novamente após um minuto, em vez de esperar cinco minutos. Sem valor anterior, informa indisponibilidade. Os provedores podem servir dados em cache; não representa cotação de turismo nem preço garantido para operação.
 
 ## Configuração e segurança
 

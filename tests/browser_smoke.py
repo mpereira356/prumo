@@ -132,6 +132,11 @@ def main():
                 cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
                 assert cheque_dialog.locator('tbody tr').first.locator('.badge').inner_text()=='No prazo'
                 page.screenshot(path='artifacts/cheques-mobile.png',full_page=True)
+                page.route('**/api/dolar',lambda route:route.fulfill(json={'quote':{'bid':'5.2345','change':None,'timestamp':int(time.time()),'kind':'daily','source':'Frankfurter / BCE'},'stale':False,'source':'Frankfurter / BCE'}))
+                page.goto('http://127.0.0.1:5058/')
+                expect(page.locator('#dollar-value')).to_have_text('R$\u00a05,2345')
+                expect(page.locator('#dollar-status')).to_contain_text('Referência diária')
+                expect(page.locator('#dollar-change')).to_be_hidden()
                 assert not errors, errors
                 browser.close()
                 print('Browser QA: desktop, mobile, dark mode, navigation and console OK.')
