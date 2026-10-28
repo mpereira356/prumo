@@ -25,6 +25,8 @@ def main():
             conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9901,json.dumps(contract)))
             interest_contract=dict(tomador='Juros de teste',tipo='JUROS_COM_AMORTIZACAO',status='ATIVO',risco='medio',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas=3,inicio='2020-01-15',fim='2020-03-15')
             conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9902,json.dumps(interest_contract)))
+            cheques=dict(tomador='Cheques de teste',tipo='CHEQUES',status='ATIVO',risco='baixo',principal='330',inicio='2027-01-01',cheques=[dict(data='2027-01-10',valor='110'),dict(data='2027-01-20',valor='220')])
+            conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9903,json.dumps(cheques)))
         server=make_server('127.0.0.1',5058,app)
         thread=threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
@@ -97,6 +99,27 @@ def main():
                 page.screenshot(path='artifacts/schedule-mobile.png',full_page=True)
                 dialog.get_by_role('button',name='Fechar cronograma').click()
                 assert not dialog.is_visible()
+                page.get_by_role('button',name='Ver cronograma de Cheques de teste',exact=True).click()
+                cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
+                first=cheque_dialog.locator('tbody tr').first
+                first.get_by_role('button',name='Pagamento confirmado',exact=True).click()
+                page.wait_for_url('**/recebiveis#schedule-9903')
+                cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
+                assert cheque_dialog.is_visible()
+                assert cheque_dialog.locator('tbody tr').count()==2
+                first=cheque_dialog.locator('tbody tr').first
+                assert first.locator('.badge').inner_text()=='Pago'
+                page.once('dialog',lambda confirm:confirm.accept())
+                first.get_by_role('button',name='Em atraso',exact=True).click()
+                page.wait_for_load_state('networkidle')
+                cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
+                assert cheque_dialog.is_visible()
+                assert cheque_dialog.locator('tbody tr').first.locator('.badge').inner_text()=='Em atraso'
+                cheque_dialog.locator('tbody tr').first.get_by_role('button',name='No prazo',exact=True).click()
+                page.wait_for_load_state('networkidle')
+                cheque_dialog=page.get_by_role('dialog',name='Cheques de teste',exact=True)
+                assert cheque_dialog.locator('tbody tr').first.locator('.badge').inner_text()=='No prazo'
+                page.screenshot(path='artifacts/cheques-mobile.png',full_page=True)
                 assert not errors, errors
                 browser.close()
                 print('Browser QA: desktop, mobile, dark mode, navigation and console OK.')

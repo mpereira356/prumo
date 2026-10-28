@@ -50,6 +50,14 @@ document.querySelectorAll('.schedule-dialog').forEach(dialog => {
     if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
   });
 });
+function openScheduleFromHash() {
+  const id = location.hash.slice(1);
+  if (!/^schedule-\d+$/.test(id)) return;
+  const dialog = document.getElementById(id);
+  if (dialog?.matches('dialog.schedule-dialog') && !dialog.open) dialog.showModal();
+}
+openScheduleFromHash();
+window.addEventListener('hashchange', openScheduleFromHash);
 
 const paymentForm = document.getElementById('combined-payment');
 if (paymentForm) {

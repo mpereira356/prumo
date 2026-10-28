@@ -122,6 +122,16 @@ def validate_backup(payload, today):
     # Importação local evita dependência circular na inicialização do app.
     from app import schedule
     known={r['key'] for r in schedule(result['emprestimos'])}
+    originals={e['id']:e for e in payload.get('emprestimos',[])}
+    for e in result['emprestimos']:
+        states=originals[e['id']].get('situacaoCheques',{})
+        if not isinstance(states,dict) or len(states)>100:
+            raise ValueError('Situações de cheques inválidas.')
+        valid_keys={r['key'] for r in schedule([e])} if e['tipo']=='CHEQUES' else set()
+        if any(key not in valid_keys or value not in ('EM_ATRASO','NO_PRAZO') for key,value in states.items()):
+            raise ValueError('Situação sem correspondência com o cheque.')
+        if states:
+            e['situacaoCheques']=states
     payments=payload.get('recebimentosConfirmados',{})
     if not isinstance(payments,dict) or len(payments)>20000:
         raise ValueError('Lista de pagamentos inválida.')

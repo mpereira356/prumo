@@ -317,6 +317,49 @@ class FinanceTests(unittest.TestCase):
             self.assertEqual(backup['recebimentosConfirmados']['2026-01-90'],'20.00')
             self.assertEqual(backup['emprestimos'][0]['principalAtual'],'1000.00')
 
+    def insert_cheques(self):
+        e=dict(id=80,tomador='Cheques sintéticos',tipo='CHEQUES',status='ATIVO',risco='medio',principal='330',inicio='2027-01-01',cheques=[dict(data='2027-01-10',valor='110'),dict(data='2027-01-20',valor='220')])
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(80,json.dumps(e)))
+
+    def test_cheque_status_transitions_keep_each_cheque_and_totals(self):
+        self.login()
+        self.insert_cheques()
+        with patch('app.today',return_value=date(2026,10,27)):
+            token=self.csrf('/recebiveis')
+            values=dict(csrf_token=token,key='2027-01-80-c1',status='late')
+            self.assertEqual(self.client.post('/contrato/80/cheque',data=values).status_code,302)
+            e=self.client.get('/exportar/json').json['emprestimos'][0]
+            self.assertEqual(e['situacaoCheques'],{'2027-01-80-c1':'EM_ATRASO'})
+            self.assertIn(b'Em atraso',self.client.get('/recebiveis').data)
+            values['status']='paid'
+            for _ in range(2):
+                r=self.client.post('/contrato/80/cheque',data=values)
+                self.assertTrue(r.location.endswith('#schedule-80'))
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados'],{'2027-01-80-c1':'220.00'})
+            self.assertEqual(len(backup['emprestimos'][0]['cheques']),2)
+            self.assertEqual(backup['emprestimos'][0]['situacaoCheques'],{})
+            values['status']='on_time'
+            self.client.post('/contrato/80/cheque',data=values)
+            backup=self.client.get('/exportar/json').json
+            self.assertEqual(backup['recebimentosConfirmados'],{})
+            self.assertEqual(backup['emprestimos'][0]['situacaoCheques'],{'2027-01-80-c1':'NO_PRAZO'})
+
+    def test_cheque_status_backup_roundtrip_and_invalid_targets(self):
+        self.login()
+        self.insert_cheques()
+        self.insert_loan()
+        token=self.csrf('/recebiveis')
+        for path,key,status,expected in [('/contrato/80/cheque','2027-01-80-c0','invalid',400),('/contrato/80/cheque','2027-01-90-c0','paid',404),('/contrato/90/cheque','2026-01-90','paid',404)]:
+            self.assertEqual(self.client.post(path,data=dict(csrf_token=token,key=key,status=status)).status_code,expected)
+        self.assertEqual(self.client.post('/contrato/80/cheque',data=dict(key='2027-01-80-c0',status='paid')).status_code,400)
+        self.client.post('/contrato/80/cheque',data=dict(csrf_token=token,key='2027-01-80-c0',status='late'))
+        backup=self.client.get('/exportar/json').json
+        self.client.post('/dados',data={'csrf_token':token,'confirm':'SUBSTITUIR','backup':(io.BytesIO(json.dumps(backup).encode()),'backup.json')})
+        restored=self.client.get('/exportar/json').json
+        self.assertEqual(restored['emprestimos'][0]['situacaoCheques'],{'2027-01-80-c0':'EM_ATRASO'})
+
 
 if __name__=='__main__':
     unittest.main()

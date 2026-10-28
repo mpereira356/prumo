@@ -336,13 +336,17 @@ def create_app(test_config=None):
         for key,value in legacy_interest.items():
             payments[key]=max(payments.get(key,Decimal(0)),value)
         active_ids={e['id'] for e in contracts if e['status']=='ATIVO'}
+        cheque_ids={e['id'] for e in contracts if e['tipo']=='CHEQUES'}
+        cheque_status={key:value for e in contracts if e['tipo']=='CHEQUES' for key,value in e.get('situacaoCheques',{}).items()}
         rows=[r for r in rows if r['contract'] in active_ids or r['key'] in payments]
         for r in rows:
             r['paid']=payments.get(r['key'],Decimal(0))
             if r['paid']:
                 r['amount']=max(r['paid'],legacy_expected.get(r['key'],r['paid']))
             r['settled']=r['paid']>=r['amount']
-            r['overdue']=r['due']<today().isoformat() and not r['settled']
+            r['is_cheque']=r['contract'] in cheque_ids
+            manual=cheque_status.get(r['key']) if r['is_cheque'] else None
+            r['overdue']=not r['settled'] and (manual=='EM_ATRASO' or (manual!='NO_PRAZO' and r['due']<today().isoformat()))
         invested=sum((money(Decimal(str(a['qtd']))*Decimal(str(a['atual']))) for a in assets),Decimal(0))
         cost=sum((money(Decimal(str(a['qtd']))*Decimal(str(a['pm']))) for a in assets),Decimal(0))
         pending=sum((r['amount']-r['paid'] for r in rows),Decimal(0))
@@ -516,7 +520,7 @@ def create_app(test_config=None):
                     raise ValueError('Cronograma limitado a 480 meses.')
                 if contract_id:
                     confirmed_keys={p['key'] for p in db().execute('SELECT key FROM payments')}
-                    has_payments=bool(original.get('pagamentosExtras')) or any(r['key'] in confirmed_keys for r in schedule([original]))
+                    has_payments=bool(original.get('pagamentosExtras')) or bool(original.get('situacaoCheques')) or any(r['key'] in confirmed_keys for r in schedule([original]))
                     def terms(contract):
                         numeric=tuple(Decimal(str(contract.get(k,0))) for k in ('principal','taxa','valorMensal','primeiraParcela'))
                         return numeric,contract.get('principalAtual',contract.get('principal',0)),[(r['key'],r['due'],r['amount']) for r in schedule([contract])]
@@ -559,6 +563,33 @@ def create_app(test_config=None):
         db().commit()
         flash('Contrato e seus recebimentos excluídos.','success')
         return redirect(url_for('receivables'))
+
+    @app.post('/contrato/<int:contract_id>/cheque')
+    @protected
+    def cheque_status(contract_id):
+        db().execute('BEGIN IMMEDIATE')
+        e=next((e for e in records('contracts') if e['id']==contract_id and e['tipo']=='CHEQUES'),None)
+        if not e:
+            abort(404)
+        key=request.form.get('key','')
+        row=next((r for r in schedule([e]) if r['key']==key),None)
+        if not row:
+            abort(404)
+        status=request.form.get('status')
+        if status not in ('paid','late','on_time'):
+            abort(400)
+        states=e.setdefault('situacaoCheques',{})
+        if status=='paid':
+            db().execute('INSERT INTO payments VALUES (?,?,?) ON CONFLICT(key) DO NOTHING',(key,str(row['amount']),today().isoformat()))
+            states.pop(key,None)
+        else:
+            db().execute('DELETE FROM payments WHERE key=?',(key,))
+            states[key]='EM_ATRASO' if status=='late' else 'NO_PRAZO'
+        db().execute('UPDATE contracts SET payload=? WHERE id=?',(json.dumps(e),contract_id))
+        audit('cheque_status_'+status)
+        db().commit()
+        flash({'paid':'Pagamento do cheque confirmado.','late':'Cheque marcado em atraso.','on_time':'Cheque marcado no prazo; confirmação de pagamento removida, se existia.'}[status],'success')
+        return redirect(url_for('receivables')+f'#schedule-{contract_id}')
 
     @app.route('/contrato/<int:contract_id>/pagamento',methods=['GET','POST'])
     @protected
