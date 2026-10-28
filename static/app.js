@@ -36,3 +36,36 @@ const type = document.getElementById('contract-type');
 function showCheque() { const field = document.getElementById('cheque-field'); if (field) field.hidden = type.value !== 'CHEQUES'; }
 type?.addEventListener('change', showCheque);
 if (type) showCheque();
+
+const dollar = document.getElementById('dollar-quote');
+if (dollar) {
+  let fetching = false;
+  const value = document.getElementById('dollar-value');
+  const change = document.getElementById('dollar-change');
+  const status = document.getElementById('dollar-status');
+  const format = new Intl.NumberFormat('pt-BR', {style:'currency',currency:'BRL',minimumFractionDigits:4,maximumFractionDigits:4});
+  async function refreshDollar() {
+    if (fetching || document.hidden) return;
+    fetching = true;
+    try {
+      const response = await fetch(dollar.dataset.url, {headers:{Accept:'application/json'}});
+      const data = await response.json();
+      if (!response.ok || !data.quote) throw new Error('unavailable');
+      const bid = Number(data.quote.bid), variation = Number(data.quote.change);
+      if (!Number.isFinite(bid) || !Number.isFinite(variation)) throw new Error('invalid');
+      value.textContent = format.format(bid);
+      change.textContent = `${variation >= 0 ? '+' : ''}${variation.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}%`;
+      change.className = variation >= 0 ? 'positive' : 'negative';
+      const date = new Date(data.quote.timestamp * 1000);
+      const stamp = new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(date);
+      status.textContent = `${data.stale ? 'Última cotação' : 'Cotação'}: ${stamp} · Brasília`;
+      dollar.title = `Dólar comercial · compra · AwesomeAPI. ${data.stale ? 'Valor desatualizado ou provedor indisponível.' : 'Consulta a cada 5 minutos.'}`;
+    } catch (_) {
+      if (value.textContent === '—') status.textContent = 'Cotação indisponível';
+      else status.textContent = 'Último valor · sem atualização';
+    } finally { fetching = false; }
+  }
+  refreshDollar();
+  setInterval(refreshDollar, 300000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshDollar(); });
+}

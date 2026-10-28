@@ -38,6 +38,7 @@ Não há senha padrão nem cadastro público. Use uma senha de pelo menos 12 car
 
 - Carteira com busca, filtros, cadastro, edição e exclusão de posições.
 - Cotações B3 opcionais pelo servidor com token de ambiente.
+- Dólar comercial USD/BRL no cabeçalho de todas as páginas, com variação e horário de Brasília; atualização automática a cada cinco minutos.
 - Contratos parcelados, cheques, juros mensais e amortizações.
 - Fluxo de 36 meses, atrasos, confirmação idempotente e reversão de pagamentos.
 - Metas, simulação de juros compostos e histórico de aportes.
@@ -61,6 +62,8 @@ Principal a amortizar fica separado das parcelas de juros. Cheques e parcelas pr
 Simulações usam juros compostos sobre a carteira atual, sem novos aportes, impostos, taxas ou resgates. Não representam retorno garantido.
 
 O botão **Cotações B3** requer `BRAPI_TOKEN` no ambiente e plano compatível com consultas em lote. Aceita uma tentativa a cada cinco minutos e preserva preços sem resposta. Foi testado com respostas simuladas; consultas reais exigem sua credencial. Use uma chave nova: a chave do HTML antigo precisa ser revogada. [Documentação oficial da brapi](https://brapi.dev/docs/examples/python).
+
+O dólar usa o preço de compra comercial da [AwesomeAPI](https://docs.awesomeapi.com.br/api-de-moedas), sem depender da chave brapi. As consultas passam pelo servidor, têm timeout e cache compartilhado persistente de cinco minutos. O horário exibido é o da negociação informado pelo provedor, convertido para Brasília. Em falhas, mantém a última cotação e indica falta de atualização; sem valor anterior, informa indisponibilidade. O provedor pode servir dados em cache; não representa cotação de turismo nem preço garantido para operação.
 
 ## Configuração e segurança
 

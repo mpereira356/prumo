@@ -2,6 +2,7 @@
 import json
 import re
 import urllib.request
+import time
 from decimal import Decimal
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -26,3 +27,17 @@ def fetch_quotes(symbols, token):
         if symbol in symbols and price.is_finite() and 0<price<=1000000000:
             prices[symbol]=str(price)
     return prices
+
+def fetch_dollar():
+    req=urllib.request.Request('https://economia.awesomeapi.com.br/json/last/USD-BRL',headers={'Accept':'application/json','User-Agent':'Prumo/1.0'})
+    with urllib.request.build_opener(NoRedirect()).open(req,timeout=5) as response:
+        raw=response.read(65537)
+        if len(raw)>65536:
+            raise ValueError('Resposta muito grande.')
+        item=json.loads(raw)['USDBRL']
+    bid=Decimal(str(item['bid']))
+    change=Decimal(str(item['pctChange']))
+    timestamp=int(item['timestamp'])
+    if not bid.is_finite() or not 0<bid<1000000 or not change.is_finite() or abs(change)>1000 or not 0<timestamp<=time.time()+300:
+        raise ValueError('Cotação inválida.')
+    return {'bid':str(bid),'change':str(change),'timestamp':timestamp}

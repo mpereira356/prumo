@@ -4,6 +4,7 @@ import re
 import sqlite3
 import tempfile
 import unittest
+import time
 from contextlib import closing
 from pathlib import Path
 from datetime import date
@@ -144,6 +145,42 @@ class FinanceTests(unittest.TestCase):
         r=self.client.post('/aporte',data={'csrf_token':self.csrf('/metas'),'amount':'200','day':'2020-01-01','category':'RF'})
         self.assertEqual(r.status_code,302)
         self.assertEqual(self.client.get('/exportar/json').json['aportes'][0]['amount'],'200.00')
+
+    def test_dollar_private_cached_and_global(self):
+        self.assertEqual(self.client.get('/api/dolar').status_code,401)
+        self.login()
+        quote={'bid':'5.1234','change':'0.42','timestamp':int(time.time())}
+        with patch('quotes.fetch_dollar',return_value=quote) as provider:
+            for _ in range(2):
+                response=self.client.get('/api/dolar')
+                self.assertEqual(response.status_code,200)
+                self.assertEqual(response.json['quote']['bid'],'5.1234')
+                self.assertFalse(response.json['stale'])
+            provider.assert_called_once()
+        for route in ['/','/carteira','/recebiveis','/fluxo','/metas','/dados','/ativo/novo']:
+            self.assertIn(b'id="dollar-quote"',self.client.get(route).data)
+
+    def test_dollar_failure_keeps_last_quote_and_retries_later(self):
+        self.login()
+        quote={'bid':'5.10','change':'-0.12','timestamp':int(time.time())}
+        with closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute('INSERT INTO exchange_rates VALUES (?,?,?)',('USD-BRL',json.dumps(quote),0))
+        with patch('quotes.fetch_dollar',side_effect=OSError('offline')) as provider:
+            for _ in range(2):
+                r=self.client.get('/api/dolar')
+                self.assertEqual(r.status_code,200)
+                self.assertEqual(r.json['quote']['bid'],'5.10')
+                self.assertTrue(r.json['stale'])
+            provider.assert_called_once()
+
+    def test_dollar_unavailable_without_inventing_value(self):
+        self.login()
+        with patch('quotes.fetch_dollar',side_effect=OSError('offline')) as provider:
+            for _ in range(2):
+                r=self.client.get('/api/dolar')
+                self.assertEqual(r.status_code,503)
+                self.assertIsNone(r.json['quote'])
+            provider.assert_called_once()
 
 
 if __name__=='__main__':

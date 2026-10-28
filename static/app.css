@@ -1,4 +1,7 @@
 @charset "UTF-8";
+.topbar{position:sticky;top:0;z-index:10}.currency-quote{font-size:11px;line-height:1.5;white-space:nowrap}.currency-quote>div{display:flex;align-items:center;gap:8px}.currency-label{color:var(--muted);font-size:9px;letter-spacing:.6px}.currency-quote strong{font-variant-numeric:tabular-nums}.currency-quote small{display:block;color:var(--muted);font-size:8px}.currency-quote #dollar-change{font-size:9px}
+@media(max-width:1000px){.topbar .private{display:none}}
+@media(max-width:600px){header.topbar{height:auto;min-height:90px;flex-wrap:wrap;gap:12px;padding:12px 18px}.topbar .top-actions{width:100%;gap:14px}.currency-quote{margin-right:auto}.topbar .breadcrumb{font-size:10px}}
 .panel,.dashboard-grid>*,.kpi-grid>*,.workspace,main{min-width:0}
 .table-wrap{position:relative}
 :root{--bg:#f7f8fa;--surface:#fff;--surface2:#f3f5f7;--text:#1c2c30;--muted:#7d898b;--border:#e8edec;--brand:#176454;--soft:#eaf3ef;--red:#b74b4b;--shadow:0 3px 16px #183b2e03;color-scheme:light}

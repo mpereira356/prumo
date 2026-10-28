@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import click
-from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for, Response
+from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for, Response, jsonify
 from flask_wtf.csrf import CSRFProtect, CSRFError
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import SecurityError
@@ -129,6 +129,7 @@ def create_app(test_config=None):
         CREATE TABLE IF NOT EXISTS attempts(bucket TEXT NOT NULL, stamp REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS attempts_bucket ON attempts(bucket, stamp);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, user_id INTEGER, action TEXT NOT NULL, stamp TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS exchange_rates(pair TEXT PRIMARY KEY, payload TEXT, attempted REAL NOT NULL);
         ''')
         if not db().execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
             seed=ROOT/'data/initial.json'
@@ -195,6 +196,40 @@ def create_app(test_config=None):
     @app.context_processor
     def context():
         return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat())
+
+    @app.get('/api/dolar')
+    def dollar_quote():
+        if g.user is None:
+            return jsonify(error='Autenticação necessária.'),401
+        now=time.time()
+        conn=db()
+        # Reserva a consulta entre workers sem segurar o banco durante a rede.
+        conn.execute('BEGIN IMMEDIATE')
+        cached=conn.execute("SELECT * FROM exchange_rates WHERE pair='USD-BRL'").fetchone()
+        quote=json.loads(cached['payload']) if cached and cached['payload'] else None
+        refresh=not cached or now-cached['attempted']>=300
+        if refresh:
+            conn.execute("INSERT INTO exchange_rates(pair,payload,attempted) VALUES ('USD-BRL',NULL,?) ON CONFLICT(pair) DO UPDATE SET attempted=excluded.attempted",(now,))
+        conn.commit()
+        failed=False
+        if refresh:
+            try:
+                from quotes import fetch_dollar
+                quote=fetch_dollar()
+                conn.execute("UPDATE exchange_rates SET payload=? WHERE pair='USD-BRL'",(json.dumps(quote),))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                failed=True
+                if quote:
+                    quote['refresh_failed']=True
+                    conn.execute("UPDATE exchange_rates SET payload=? WHERE pair='USD-BRL'",(json.dumps(quote),))
+                    conn.commit()
+        if not quote:
+            return jsonify(quote=None,stale=True,error='Cotação indisponível.'),503
+        # Timestamp da negociação, nunca o horário local da consulta.
+        stale=failed or quote.get('refresh_failed',False) or now-quote['timestamp']>900
+        return jsonify(quote=quote,stale=stale,source='AwesomeAPI')
 
     @app.cli.command('create-admin')
     @click.option('--username', prompt='Usuário')

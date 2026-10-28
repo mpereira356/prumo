@@ -5,6 +5,8 @@ import secrets
 import sqlite3
 import tempfile
 import threading
+import json
+import time
 from contextlib import closing
 from pathlib import Path
 from werkzeug.security import generate_password_hash
@@ -26,6 +28,7 @@ def main():
             with sync_playwright() as p:
                 browser=p.chromium.launch(headless=True)
                 page=browser.new_page(viewport={'width':1440,'height':1100},device_scale_factor=1)
+                page.route('**/api/dolar',lambda route:route.fulfill(json={'quote':{'bid':'5.1234','change':'0.42','timestamp':int(time.time())},'stale':False,'source':'AwesomeAPI'}))
                 errors=[]
                 page.on('pageerror',lambda error: errors.append(str(error)))
                 page.on('console',lambda message: errors.append(message.text) if message.type=='error' else None)
@@ -34,6 +37,7 @@ def main():
                 page.get_by_label('Senha',exact=True).fill(password)
                 page.get_by_role('button',name='Entrar no painel').click()
                 page.wait_for_url('http://127.0.0.1:5058/')
+                page.wait_for_function("document.getElementById('dollar-value').textContent.includes('5,1234')")
                 Path('artifacts').mkdir(exist_ok=True)
                 page.screenshot(path='artifacts/dashboard-desktop.png',full_page=True)
                 for route in ['carteira','recebiveis','fluxo','metas','dados','ativo/novo','contrato/novo']:
