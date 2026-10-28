@@ -620,7 +620,7 @@ def create_app(test_config=None):
 
     @app.get('/carteira')
     @protected
-    def portfolio():
+    def portfolio(modal_error=None,modal_values=None):
         data=financial()
         q=request.args.get('q','').strip()[:100]
         category=request.args.get('classe','')
@@ -631,7 +631,7 @@ def create_app(test_config=None):
             if asset['price_alert']:
                 asset['price_alert']['delivery_failed']=(asset['price_alert']['asset_ref'],asset['price_alert']['version']) in failed
         data['assets']=[a for a in data['assets'] if (not category or a['classe']==category) and (not q or q.lower() in (a['nome']+' '+a['ticker']).lower())]
-        return render_template('portfolio.html',page='portfolio',title='Meus investimentos',q=q,category=category,**data)
+        return render_template('portfolio.html',page='portfolio',title='Meus investimentos',q=q,category=category,modal_error=modal_error,modal_values=modal_values,**data)
 
     @app.post('/ativo/<int:asset_id>/alerta')
     @protected
@@ -735,6 +735,9 @@ def create_app(test_config=None):
                 return redirect(url_for('portfolio'))
             except ValueError as e:
                 db().rollback()
+                if asset_id and request.form.get('modal')=='1':
+                    flash(str(e),'investment-error')
+                    return portfolio(modal_error=f'asset-edit-{asset_id}',modal_values={k:request.form.get(k,'') for k in ('ticker','nome','classe','qtd','pm','atual')})
                 flash(str(e),'error')
                 asset=request.form
         return render_template('asset_form.html',asset=asset or {},editing=bool(asset_id),wallet_balance=Decimal(wallet.balance(db()))/100,page='portfolio',title='Editar posição' if asset_id else 'Nova posição')
@@ -770,6 +773,9 @@ def create_app(test_config=None):
                 return redirect(url_for('portfolio'))
             except ValueError as error:
                 db().rollback()
+                if request.form.get('modal')=='1':
+                    flash(str(error),'investment-error')
+                    return portfolio(modal_error=f'asset-sell-{asset_id}',modal_values=dict(request.form))
                 flash(str(error),'error')
         return render_template('sell_asset.html',asset=asset,page='portfolio',title='Resgatar investimento')
 

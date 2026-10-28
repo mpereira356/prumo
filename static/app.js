@@ -67,7 +67,7 @@ document.querySelectorAll('[data-schedule-dialog]').forEach(button => {
   });
 });
 document.querySelectorAll('.schedule-dialog').forEach(dialog => {
-  dialog.querySelector('[data-dialog-close]').addEventListener('click', () => dialog.close());
+  dialog.querySelectorAll('[data-dialog-close], [data-dialog-cancel]').forEach(button => button.addEventListener('click', () => dialog.close()));
   dialog.addEventListener('close', () => {
     const toast = dialog.querySelector('#undo-toast');
     if (toast) document.body.appendChild(toast);
@@ -87,6 +87,7 @@ function openScheduleFromHash() {
   document.querySelectorAll('dialog[open]').forEach(other => { if (other!==dialog) other.close(); });
   if (dialog?.matches('dialog.schedule-dialog') && !dialog.open) { placeUndoToast(dialog); dialog.showModal(); }
 }
+document.querySelectorAll('dialog[data-auto-open]').forEach(dialog => { placeUndoToast(dialog); dialog.showModal(); });
 openScheduleFromHash();
 window.addEventListener('hashchange', openScheduleFromHash);
 

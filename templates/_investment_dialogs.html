@@ -1,0 +1,10 @@
+{% for kind,label in [('edit','Editar posição'),('sell','Resgatar investimento')] %}
+{% set dialog_id='asset-'~kind~'-'~a.id %}
+<dialog class="schedule-dialog settings-dialog" id="{{ dialog_id }}" aria-labelledby="{{ dialog_id }}-title" {{ 'data-auto-open' if modal_error==dialog_id }}>
+<div class="schedule-heading"><div><span class="eyebrow">MEUS INVESTIMENTOS</span><h2 id="{{ dialog_id }}-title">{{ label }} · {{ a.ticker }}</h2></div><button type="button" class="icon-button" data-dialog-close aria-label="Fechar" autofocus>×</button></div>
+<div class="schedule-content settings-content">
+{% if modal_error==dialog_id %}{% for category,message in get_flashed_messages(with_categories=true) if category=='investment-error' %}<div class="notice error" role="alert">{{ message }}</div>{% endfor %}{% endif %}
+{% with asset=(dict(a,**modal_values) if modal_error==dialog_id and modal_values and kind=='edit' else a),editing=true,in_modal=true %}
+{% if kind=='edit' %}{% include '_asset_form_fields.html' %}{% else %}{% include '_sell_asset_fields.html' %}{% endif %}
+{% endwith %}</div></dialog>
+{% endfor %}
