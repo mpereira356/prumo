@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -21,6 +22,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import SecurityError
 from undo import snapshot, fingerprint, restore
 import wallet
+import notifications
 
 ROOT = Path(__file__).resolve().parent
 CLASSES = {'ACOES': 'Ações', 'FIIs': 'Fundos imobiliários', 'TESOURO': 'Tesouro Direto', 'RF': 'Renda fixa', 'PREV': 'Previdência', 'BDR': 'BDRs', 'ETF': 'ETFs', 'COE': 'COE'}
@@ -51,6 +53,12 @@ def text(value, limit=150):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ValueError('Preencha os campos de texto respeitando o limite de caracteres.')
     return value.strip()
+
+def email_address(value):
+    value=text(value,254)
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',value):
+        raise ValueError('Informe um e-mail válido.')
+    return value
 
 def today():
     # Offset de Brasília, independente do fuso horário do servidor.
@@ -159,7 +167,12 @@ def create_app(test_config=None):
         CREATE TABLE IF NOT EXISTS wallet_entries(id INTEGER PRIMARY KEY, amount_cents INTEGER NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL, reference TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS wallet_sources(reference TEXT PRIMARY KEY, baseline_cents INTEGER NOT NULL, credited_cents INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS undo_actions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, session_hash TEXT NOT NULL, label TEXT NOT NULL, before_state TEXT NOT NULL, after_hash TEXT NOT NULL, created REAL NOT NULL, activated REAL, expires REAL NOT NULL, destination TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS telegram_settings(user_id INTEGER PRIMARY KEY REFERENCES users(id),token_enc TEXT NOT NULL,chat_id TEXT NOT NULL,verified INTEGER NOT NULL DEFAULT 0,verified_at TEXT,version TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS price_alerts(user_id INTEGER NOT NULL REFERENCES users(id),asset_ref TEXT NOT NULL,threshold TEXT NOT NULL,baseline TEXT NOT NULL,enabled INTEGER NOT NULL,version TEXT NOT NULL,PRIMARY KEY(user_id,asset_ref));
+        CREATE TABLE IF NOT EXISTS alert_deliveries(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,asset_ref TEXT NOT NULL,version TEXT NOT NULL,direction TEXT NOT NULL,price TEXT NOT NULL,ticker TEXT NOT NULL,created REAL NOT NULL,status TEXT NOT NULL,message_id INTEGER,UNIQUE(user_id,asset_ref,version,direction));
         ''')
+        if 'email' not in {row['name'] for row in db().execute('PRAGMA table_info(users)')}:
+            db().execute("ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''")
         if not db().execute("SELECT 1 FROM settings WHERE key='initialized'").fetchone():
             seed=ROOT/'data/initial.json'
             if not seed.is_file():
@@ -171,6 +184,11 @@ def create_app(test_config=None):
             db().commit()
         db().execute('BEGIN IMMEDIATE')
         wallet.initialize(db())
+        for row in db().execute('SELECT * FROM assets').fetchall():
+            asset=json.loads(row['payload'])
+            if not asset.get('alertRef'):
+                asset['alertRef']=secrets.token_hex(16)
+                db().execute('UPDATE assets SET payload=? WHERE id=?',(json.dumps(asset),row['id']))
         db().commit()
 
     def begin_change():
@@ -266,7 +284,104 @@ def create_app(test_config=None):
 
     @app.context_processor
     def context():
-        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat(),undo_notice=undo_notice(),header_wallet_balance=Decimal(wallet.balance(db()))/100 if g.get('user') else Decimal(0))
+        telegram=db().execute('SELECT chat_id,verified,verified_at FROM telegram_settings WHERE user_id=?',(g.user['id'],)).fetchone() if g.get('user') else None
+        return dict(classes=CLASSES, types=TYPES, current_user=g.get('user'), today=today().isoformat(),undo_notice=undo_notice(),header_wallet_balance=Decimal(wallet.balance(db()))/100 if g.get('user') else Decimal(0),telegram_config=telegram,settings_return=request.path if request.path in ('/','/carteira','/recebiveis','/fluxo','/metas','/extrato','/dados') else '/')
+
+    def settings_destination(section='account'):
+        target=request.form.get('return_to','/')
+        if target not in ('/','/carteira','/recebiveis','/fluxo','/metas','/extrato','/dados'):
+            target='/'
+        return target+('#settings-telegram' if section=='telegram' else '#settings-account')
+
+    def settings_flash(message,category='success'):
+        flash(message,'settings-'+category)
+
+    @app.post('/configuracoes/senha')
+    @protected
+    def change_password():
+        limited(f'password:{g.user["id"]}',5,300)
+        current=request.form.get('current_password','')
+        new=request.form.get('new_password','')
+        confirm=request.form.get('confirm_password','')
+        if len(current)>128 or not check_password_hash(g.user['password'],current):
+            settings_flash('A senha atual está incorreta.','error')
+        elif not 12<=len(new)<=128 or new!=confirm:
+            settings_flash('A nova senha deve ter de 12 a 128 caracteres e coincidir com a confirmação.','error')
+        elif current==new:
+            settings_flash('Escolha uma senha diferente da atual.','error')
+        else:
+            hashed=generate_password_hash(new,method='scrypt')
+            db().execute('BEGIN IMMEDIATE')
+            result=db().execute('UPDATE users SET password=? WHERE id=? AND password=?',(hashed,g.user['id'],g.user['password']))
+            if result.rowcount!=1:
+                db().rollback()
+                settings_flash('A senha foi alterada em outra sessão. Entre novamente.','error')
+                return redirect(url_for('login'))
+            user_id=g.user['id']
+            db().execute('DELETE FROM sessions WHERE user_id=?',(user_id,))
+            token=secrets.token_urlsafe(32)
+            db().execute('INSERT INTO sessions VALUES (?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user_id,time.time()+1800))
+            audit('password_changed')
+            db().commit()
+            session.clear()
+            session['token']=token
+            session.permanent=True
+            settings_flash('Senha alterada. As outras sessões foram encerradas.','success')
+        return redirect(settings_destination())
+
+    @app.post('/configuracoes/telegram')
+    @protected
+    def save_telegram():
+        try:
+            chat=request.form.get('chat_id','').strip()
+            token=request.form.get('bot_token','').strip()
+            notifications.validate_chat(chat)
+            existing=db().execute('SELECT * FROM telegram_settings WHERE user_id=?',(g.user['id'],)).fetchone()
+            if token:
+                encrypted=notifications.encrypt_token(app.config['SECRET_KEY'],token)
+            elif existing:
+                encrypted=existing['token_enc']
+                token=notifications.decrypt_token(app.config['SECRET_KEY'],encrypted)
+            else:
+                raise notifications.TelegramError('Informe o Bot Token antes de salvar.')
+            try:
+                old_token=notifications.decrypt_token(app.config['SECRET_KEY'],existing['token_enc']) if existing else None
+            except notifications.TelegramError:
+                old_token=None
+            changed=not existing or existing['chat_id']!=chat or old_token!=token
+            version=secrets.token_hex(16) if changed else existing['version']
+            db().execute('INSERT INTO telegram_settings VALUES (?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET token_enc=excluded.token_enc,chat_id=excluded.chat_id,verified=excluded.verified,verified_at=excluded.verified_at,version=excluded.version',(g.user['id'],encrypted,chat,0 if changed else existing['verified'],None if changed else existing['verified_at'],version))
+            if changed:
+                db().execute("UPDATE alert_deliveries SET status='canceled' WHERE user_id=? AND status='pending'",(g.user['id'],))
+                db().execute('UPDATE price_alerts SET version=? WHERE user_id=?',(secrets.token_hex(16),g.user['id']))
+            audit('telegram_saved')
+            db().commit()
+            settings_flash('Configuração salva. Envie uma mensagem de teste para verificar o chat.','success')
+        except notifications.TelegramError as error:
+            db().rollback()
+            settings_flash(str(error),'error')
+        return redirect(settings_destination('telegram'))
+
+    @app.post('/configuracoes/telegram/testar')
+    @protected
+    def test_telegram():
+        limited(f'telegram-test:{g.user["id"]}',3,60)
+        config=db().execute('SELECT * FROM telegram_settings WHERE user_id=?',(g.user['id'],)).fetchone()
+        if not config:
+            settings_flash('Salve o Bot Token e o Chat ID antes de testar.','error')
+            return redirect(settings_destination('telegram'))
+        try:
+            token=notifications.decrypt_token(app.config['SECRET_KEY'],config['token_enc'])
+            notifications.send_message(token,config['chat_id'],'Prumo: mensagem de teste. A integração com este chat está funcionando.')
+            result=db().execute('UPDATE telegram_settings SET verified=1,verified_at=? WHERE user_id=? AND version=?',(datetime.now(ZoneInfo('America/Sao_Paulo')).isoformat(),g.user['id'],config['version']))
+            audit('telegram_verified')
+            db().commit()
+            settings_flash('Telegram verificado: a API confirmou o envio ao chat configurado.' if result.rowcount else 'A configuração mudou durante o teste. Teste novamente.','success' if result.rowcount else 'error')
+        except notifications.TelegramError as error:
+            db().execute('UPDATE telegram_settings SET verified=0,verified_at=NULL WHERE user_id=? AND version=?',(g.user['id'],config['version']))
+            db().commit()
+            settings_flash(str(error),'error')
+        return redirect(settings_destination('telegram'))
 
     @app.post('/desfazer')
     @protected
@@ -336,17 +451,47 @@ def create_app(test_config=None):
 
     @app.cli.command('create-admin')
     @click.option('--username', prompt='Usuário')
+    @click.option('--email',prompt='E-mail de cadastro')
     @click.password_option(confirmation_prompt=True)
-    def create_admin(username, password):
+    def create_admin(username, email, password):
         """Cria acesso localmente; não há cadastro público."""
         if len(password) < 12 or len(password) > 128:
             raise click.ClickException('Use uma senha entre 12 e 128 caracteres.')
         try:
-            db().execute('INSERT INTO users(username,password) VALUES (?,?)', (text(username,80),generate_password_hash(password,method='scrypt')))
+            db().execute('INSERT INTO users(username,password,email) VALUES (?,?,?)', (text(username,80),generate_password_hash(password,method='scrypt'),email_address(email)))
             db().commit()
         except (sqlite3.IntegrityError,ValueError):
             raise click.ClickException('Usuário inválido ou já existente.')
         click.echo('Acesso criado. Entre no painel com este usuário e senha.')
+
+    @app.cli.command('set-email')
+    @click.option('--username',prompt='Usuário')
+    @click.option('--email',prompt='E-mail de cadastro')
+    def set_email(username,email):
+        """Completa/corrige o cadastro pelo administrador do servidor."""
+        try:
+            value=email_address(email)
+        except ValueError as error:
+            raise click.ClickException(str(error))
+        result=db().execute('UPDATE users SET email=? WHERE username=?',(value,username))
+        db().commit()
+        if not result.rowcount:
+            raise click.ClickException('Usuário não encontrado.')
+        click.echo('E-mail cadastrado.')
+
+    def process_price_alerts(refs=None):
+        try:
+            notifications.queue_alerts(db(),refs)
+            return notifications.deliver_alerts(db(),app.config['SECRET_KEY'])
+        except Exception:
+            db().rollback()
+            app.logger.warning('Não foi possível processar os alertas de preço. Os preços salvos foram preservados.')
+            return 0
+
+    @app.cli.command('process-price-alerts')
+    def process_alerts_command():
+        """Avalia os preços salvos e envia até cinco alertas pendentes."""
+        click.echo(f'{process_price_alerts()} alerta(s) enviado(s).')
 
     @app.cli.command('reset-password')
     @click.option('--username', prompt='Usuário')
@@ -479,8 +624,43 @@ def create_app(test_config=None):
         data=financial()
         q=request.args.get('q','').strip()[:100]
         category=request.args.get('classe','')
+        alerts={r['asset_ref']:dict(r) for r in db().execute('SELECT * FROM price_alerts WHERE user_id=?',(g.user['id'],))}
+        failed={(r['asset_ref'],r['version']) for r in db().execute("SELECT asset_ref,version FROM alert_deliveries WHERE user_id=? AND status='failed'",(g.user['id'],))}
+        for asset in data['assets']:
+            asset['price_alert']=alerts.get(notifications.asset_ref(asset))
+            if asset['price_alert']:
+                asset['price_alert']['delivery_failed']=(asset['price_alert']['asset_ref'],asset['price_alert']['version']) in failed
         data['assets']=[a for a in data['assets'] if (not category or a['classe']==category) and (not q or q.lower() in (a['nome']+' '+a['ticker']).lower())]
         return render_template('portfolio.html',page='portfolio',title='Meus investimentos',q=q,category=category,**data)
+
+    @app.post('/ativo/<int:asset_id>/alerta')
+    @protected
+    def save_price_alert(asset_id):
+        try:
+            db().execute('BEGIN IMMEDIATE')
+            asset=next((a for a in records('assets') if a['id']==asset_id),None)
+            if not asset:
+                abort(404)
+            enabled=request.form.get('enabled')=='1'
+            ref=notifications.asset_ref(asset)
+            if enabled:
+                config=db().execute('SELECT verified FROM telegram_settings WHERE user_id=?',(g.user['id'],)).fetchone()
+                if not config or not config['verified']:
+                    raise ValueError('Configure e verifique o Telegram antes de ativar alertas.')
+                threshold=number(request.form.get('threshold'),Decimal('.01'),1000)
+                baseline=number(asset['atual'],Decimal('.000001'))
+                db().execute('INSERT INTO price_alerts VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,asset_ref) DO UPDATE SET threshold=excluded.threshold,baseline=excluded.baseline,enabled=1,version=excluded.version',(g.user['id'],ref,str(threshold),str(baseline),1,secrets.token_hex(16)))
+            else:
+                db().execute('UPDATE price_alerts SET enabled=0 WHERE user_id=? AND asset_ref=?',(g.user['id'],ref))
+            db().execute("UPDATE alert_deliveries SET status='canceled' WHERE user_id=? AND asset_ref=? AND status='pending'",(g.user['id'],ref))
+            audit('price_alert_saved')
+            db().commit()
+            flash('Alerta ativado com referência no preço atual.' if enabled else 'Alerta desativado.','success')
+            return redirect(url_for('portfolio'))
+        except ValueError as error:
+            db().rollback()
+            flash(str(error),'alert-error')
+            return redirect(url_for('portfolio')+f'#asset-alert-{asset_id}')
 
     @app.post('/cotacoes')
     @protected
@@ -506,6 +686,7 @@ def create_app(test_config=None):
                     count+=1
             audit('quotes_refreshed')
             db().commit()
+            process_price_alerts({notifications.asset_ref(a) for a in assets if a['ticker'].upper() in prices})
             flash(f'{count} posições atualizadas; {len(assets)-count} sem cotação mantiveram o último preço.','success' if count else 'error')
         except Exception:
             # Não publica detalhes do provedor, URLs ou credenciais nos logs/HTML.
@@ -536,8 +717,11 @@ def create_app(test_config=None):
                         abort(404)
                     if Decimal(a['qtd'])!=Decimal(str(current['qtd'])) or Decimal(a['pm'])!=Decimal(str(current['pm'])):
                         raise ValueError('Quantidade e preço de aquisição ficam preservados. Registre uma nova posição para comprar ou use Resgatar para vender.')
+                    if current.get('alertRef'):
+                        a['alertRef']=current['alertRef']
                     db().execute('UPDATE assets SET payload=? WHERE id=?',(json.dumps(a),asset_id))
                 else:
+                    a['alertRef']=secrets.token_hex(16)
                     acquisition=wallet.cents(Decimal(a['qtd'])*Decimal(a['pm']))
                     if acquisition<=0:
                         raise ValueError('A compra deve ter custo maior que zero.')
@@ -545,6 +729,8 @@ def create_app(test_config=None):
                     db().execute('INSERT INTO assets(payload) VALUES (?)',(json.dumps(a),))
                 audit('asset_saved')
                 db().commit()
+                if asset_id:
+                    process_price_alerts({notifications.asset_ref(dict(a,id=asset_id))})
                 flash('Posição salva. Os totais foram recalculados.','success')
                 return redirect(url_for('portfolio'))
             except ValueError as e:
@@ -968,7 +1154,7 @@ def create_app(test_config=None):
                 # Valida tudo antes de iniciar a substituição atômica.
                 for table in ('assets','contracts','payments','contributions','wallet_entries','wallet_sources'):
                     db().execute(f'DELETE FROM {table}')
-                db().executemany('INSERT INTO assets(payload) VALUES (?)',[(json.dumps(a),) for a in backup['ativos']])
+                db().executemany('INSERT INTO assets(payload) VALUES (?)',[(json.dumps(dict(a,alertRef=a.get('alertRef') or secrets.token_hex(16))),) for a in backup['ativos']])
                 db().executemany('INSERT INTO contracts(id,payload) VALUES (?,?)',[(e['id'],json.dumps(e)) for e in backup['emprestimos']])
                 db().executemany('INSERT INTO payments VALUES (?,?,?)',[(k,str(v),today().isoformat()) for k,v in backup['recebimentosConfirmados'].items()])
                 db().executemany('INSERT INTO contributions(amount,day,category) VALUES (?,?,?)',[(a['amount'],a['day'],a['category']) for a in backup['aportes']])

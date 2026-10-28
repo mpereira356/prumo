@@ -8,6 +8,7 @@ import threading
 import json
 import time
 from datetime import timedelta
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from werkzeug.security import generate_password_hash
@@ -21,7 +22,7 @@ def main():
         app=create_app({'TESTING':True,'DATABASE':database})
         password=secrets.token_urlsafe(24)
         with closing(sqlite3.connect(database)) as conn, conn:
-            conn.execute('INSERT INTO users(username,password) VALUES (?,?)',('preview',generate_password_hash(password)))
+            conn.execute('INSERT INTO users(username,password,email) VALUES (?,?,?)',('preview',generate_password_hash(password),'preview@example.com'))
             contract={'tomador':'Contrato de teste','tipo':'PARCELADO','status':'ATIVO','risco':'baixo','principal':800,'valorMensal':110,'parcelas':8,'inicio':'2026-11-10','fim':'2027-06-10'}
             conn.execute('INSERT INTO contracts(id,payload) VALUES (?,?)',(9901,json.dumps(contract)))
             interest_contract=dict(tomador='Juros de teste',tipo='JUROS_COM_AMORTIZACAO',status='ATIVO',risco='medio',principal='1000',principalAtual='1000',taxa='2',valorMensal='20',parcelas=3,inicio='2020-01-15',fim='2020-03-15')
@@ -35,7 +36,7 @@ def main():
         thread=threading.Thread(target=server.serve_forever,daemon=True)
         thread.start()
         try:
-            with sync_playwright() as p:
+            with patch('notifications.send_message',return_value=123), sync_playwright() as p:
                 browser=p.chromium.launch(headless=True)
                 page=browser.new_page(viewport={'width':1440,'height':1100},device_scale_factor=1)
                 page.route('**/api/dolar',lambda route:route.fulfill(json={'quote':{'bid':'5.1234','change':'0.42','timestamp':int(time.time())},'stale':False,'source':'AwesomeAPI'}))
@@ -50,6 +51,26 @@ def main():
                 page.wait_for_function("document.getElementById('dollar-value').textContent.includes('5,1234')")
                 Path('artifacts').mkdir(exist_ok=True)
                 page.screenshot(path='artifacts/dashboard-desktop.png',full_page=True)
+                page.get_by_role('button',name='Configurações da conta',exact=True).click()
+                settings=page.get_by_role('dialog',name='Configurações',exact=True)
+                expect(settings).to_be_visible()
+                assert settings.get_by_label('Login',exact=True).input_value()=='preview'
+                assert settings.get_by_label('Login',exact=True).get_attribute('readonly') is not None
+                assert settings.get_by_label('E-mail de cadastro',exact=True).input_value()=='preview@example.com'
+                settings.get_by_role('button',name='Configurar Telegram',exact=True).click()
+                settings.locator('[name="bot_token"]').fill('123456789:'+('A'*35))
+                settings.locator('[name="chat_id"]').fill('-1001234567890')
+                settings.get_by_role('button',name='Salvar alteração',exact=True).click()
+                page.wait_for_url('**/#settings-telegram')
+                settings=page.get_by_role('dialog',name='Configurações',exact=True)
+                expect(settings.locator('.telegram-status')).to_contain_text('Não verificado')
+                settings.get_by_role('button',name='Enviar mensagem de teste',exact=True).click()
+                page.wait_for_load_state('networkidle')
+                settings=page.get_by_role('dialog',name='Configurações',exact=True)
+                expect(settings.locator('.telegram-status .badge')).to_have_text('Verificado')
+                assert ('123456789:'+('A'*35)) not in page.content()
+                page.screenshot(path='artifacts/telegram-settings.png',full_page=False)
+                settings.get_by_role('button',name='Fechar configurações',exact=True).click()
                 page.goto('http://127.0.0.1:5058/extrato')
                 page.locator('[name="amount"]').fill('500')
                 page.locator('[name="origin"]').fill('Saldo inicial de teste')
@@ -64,6 +85,13 @@ def main():
                 page.get_by_role('button',name='Salvar posição',exact=True).click()
                 page.wait_for_url('**/carteira')
                 expect(page.locator('.wallet-value')).to_have_text('R$\u00a0300,00')
+                page.get_by_role('button',name='Configurar alerta de PRUMO-TEST',exact=True).click()
+                alert=page.get_by_role('dialog',name='Alerta · PRUMO-TEST',exact=True)
+                alert.locator('[name="enabled"]').check()
+                alert.locator('[name="threshold"]').fill('5')
+                alert.get_by_role('button',name='Salvar alerta',exact=True).click()
+                page.wait_for_url('**/carteira')
+                expect(page.get_by_role('button',name='Configurar alerta de PRUMO-TEST',exact=True)).to_have_attribute('title','Alerta ativado')
                 page.goto('http://127.0.0.1:5058/extrato')
                 expect(page.get_by_text('Saldo inicial de teste',exact=True)).to_be_visible()
                 expect(page.get_by_text('Compra · PRUMO-TEST · 2 unidades',exact=True)).to_be_visible()
@@ -187,6 +215,15 @@ def main():
                 expect(page.locator('#dollar-value')).to_have_text('R$\u00a05,2345')
                 expect(page.locator('#dollar-status')).to_contain_text('Referência diária')
                 expect(page.locator('#dollar-change')).to_be_hidden()
+                page.get_by_role('button',name='Abrir navegação',exact=True).click()
+                page.get_by_role('button',name='Configurações da conta',exact=True).click()
+                settings=page.get_by_role('dialog',name='Configurações',exact=True)
+                expect(settings).to_be_visible()
+                assert settings.evaluate('(el)=>el.getBoundingClientRect().right <= innerWidth')
+                settings.get_by_role('tab',name='Integração Telegram',exact=True).click()
+                expect(settings.locator('.telegram-status .badge')).to_have_text('Verificado')
+                page.screenshot(path='artifacts/telegram-settings-mobile.png',full_page=False)
+                settings.get_by_role('button',name='Fechar configurações',exact=True).click()
                 assert not errors, errors
                 browser.close()
                 print('Browser QA: desktop, mobile, dark mode, navigation and console OK.')

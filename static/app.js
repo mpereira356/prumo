@@ -81,12 +81,33 @@ document.querySelectorAll('.schedule-dialog').forEach(dialog => {
 });
 function openScheduleFromHash() {
   const id = location.hash.slice(1);
-  if (!/^schedule-\d+$/.test(id)) return;
-  const dialog = document.getElementById(id);
+  if (!/^(schedule-\d+|asset-alert-\d+|settings-account|settings-telegram)$/.test(id)) return;
+  const dialog = document.getElementById(id.startsWith('settings-') ? 'settings-dialog' : id);
+  if (id.startsWith('settings-')) setSettingsTab(id === 'settings-telegram' ? 'telegram' : 'account');
+  document.querySelectorAll('dialog[open]').forEach(other => { if (other!==dialog) other.close(); });
   if (dialog?.matches('dialog.schedule-dialog') && !dialog.open) { placeUndoToast(dialog); dialog.showModal(); }
 }
 openScheduleFromHash();
 window.addEventListener('hashchange', openScheduleFromHash);
+
+function setSettingsTab(name) {
+  document.querySelectorAll('.settings-tabs [role="tab"]').forEach(tab => {
+    const selected = tab.dataset.settingsTab === name;
+    tab.setAttribute('aria-selected',String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+  });
+  document.getElementById('settings-account-panel')?.toggleAttribute('hidden',name!=='account');
+  document.getElementById('settings-telegram-panel')?.toggleAttribute('hidden',name!=='telegram');
+}
+document.querySelectorAll('[data-settings-tab]').forEach(button => button.addEventListener('click',()=>setSettingsTab(button.dataset.settingsTab)));
+document.querySelector('.settings-tabs')?.addEventListener('keydown',event => {
+  if (event.key==='ArrowLeft' || event.key==='ArrowRight') {
+    const name = document.getElementById('tab-account').getAttribute('aria-selected')==='true' ? 'telegram' : 'account';
+    setSettingsTab(name);
+    document.getElementById(`tab-${name}`).focus();
+    event.preventDefault();
+  }
+});
 
 const undoToast = document.getElementById('undo-toast');
 if (undoToast) {

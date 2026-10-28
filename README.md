@@ -47,6 +47,7 @@ Não há senha padrão nem cadastro público. Use uma senha de pelo menos 12 car
 - Metas, simulação de juros compostos e histórico de aportes.
 - Exportação CSV, backup JSON e importação validada e atômica de backups v2/v3/v4.
 - Interface responsiva, navegação por teclado e tema claro/escuro.
+- Configurações da conta, troca de senha e integração Telegram por usuário, com sinos de alerta percentual em cada investimento.
 
 ## Dados e migração
 
@@ -113,6 +114,29 @@ Após salvar, excluir ou confirmar alterações financeiras importantes, aparece
 A janela começa na primeira exibição após a ação; navegar ou recarregar não reinicia a contagem. O prazo também é validado no servidor. A reversão exige a mesma conta e sessão, proteção CSRF e que nenhum dado financeiro tenha mudado desde a ação. Se outra alteração ocorrer, o servidor recusa a reversão antiga para preservar os dados mais recentes. A barra funciona também com o cronograma aberto no celular.
 
 O estado anterior é guardado temporariamente no SQLite, sem enviar dados financeiros ao cookie ou ao Git. Registros expirados são limpos nas próximas ações/exibições da barra. Essa janela curta complementa as confirmações e os backups, sem substituí-los.
+
+## Conta, Telegram e alertas de investimentos
+
+A engrenagem ao lado do nome do usuário abre as configurações. ID, login e e-mail são somente leitura. A troca de senha exige a senha atual e a nova senha digitada duas vezes; mantém a sessão atual com um token novo e encerra as outras sessões. Cadastros novos pelo CLI solicitam e-mail. Contas antigas continuam válidas e mostram “Não informado” até o administrador completar o cadastro:
+
+```bash
+# Execute no ambiente da aplicação, com as variáveis do serviço carregadas.
+.venv/bin/python -m flask --app app set-email --username cicero --email seu-email@example.com
+```
+
+Na aba Telegram, informe Bot Token e Chat ID, salve e envie a mensagem de teste. O status fica **Verificado** somente quando a API confirma o envio ao Chat ID configurado; não é uma confirmação de leitura humana ([API oficial](https://core.telegram.org/bots/api#sendmessage)). Alterar token ou chat exige nova verificação. O token é criptografado com Fernet usando uma chave derivada da `SECRET_KEY`, nunca é exibido de volta na tela e não faz parte do backup financeiro JSON. Preserve a `SECRET_KEY` do serviço: mudá-la exige reinformar tokens. Para recuperar toda a integração, guarde o SQLite e a chave em backups protegidos.
+
+O sino de cada linha em **Meus investimentos** começa desativado. Após verificar o Telegram, configure o percentual e ative-o. A referência é o preço atual salvo naquele momento. Com referência de R$ 100 e limite de 5%, há um aviso ao atingir R$ 105 e outro ao atingir R$ 95. Cada direção gera no máximo uma entrega bem-sucedida por configuração; salvar novamente fixa uma nova referência e rearma os limites. As configurações pertencem ao usuário autenticado, embora a carteira financeira seja compartilhada.
+
+Alertas são avaliados ao atualizar as cotações B3 ou editar o preço de referência de uma posição. O Prumo ainda não consulta continuamente os preços de mercado por causa do sino. A futura integração de preços pode chamar `notifications.queue_alerts` após persistir as cotações. Há uma fila persistente e um comando para avaliar os preços já armazenados e enviar até cinco avisos pendentes por execução:
+
+```bash
+.venv/bin/python -m flask --app app process-price-alerts
+```
+
+Um timer systemd opcional está em `deploy/prumo-alerts.service` e `deploy/prumo-alerts.timer`; ele processa preços já salvos, sem consultar a bolsa. Não o habilite esperando atualização de mercado. Falhas de envio não invalidam alterações de preço; uma entrega com falha exige rearmar o alerta após revisar a integração. Mensagens já enviadas não são recolhidas pelo botão Desfazer. Senhas, dados do Telegram e preferências de alertas não entram na reversão financeira nem no JSON financeiro.
+
+Os testes do envio utilizam respostas simuladas. O envio real deve ser verificado no seu grupo, pelo botão de teste, depois de configurar o token.
 
 ## Configuração e segurança
 

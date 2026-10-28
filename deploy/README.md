@@ -116,6 +116,17 @@ Guarde também uma cópia protegida dos backups fora do servidor. Backups JSON p
 
 ## Diagnóstico
 
+Para processar a fila de alertas de investimentos usando os preços já armazenados, opcionalmente instale o timer. Isso não adiciona consulta automática ao mercado:
+
+```bash
+cd /opt/prumo
+sudo install -m 644 deploy/prumo-alerts.service deploy/prumo-alerts.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now prumo-alerts.timer
+```
+
+As mensagens reais só são enviadas para usuários que salvaram e verificaram sua integração no modal de configurações e ativaram alertas no sino de cada investimento.
+
 ```bash
 sudo journalctl -u prumo -n 80 --no-pager
 sudo systemctl restart prumo

@@ -54,6 +54,7 @@ def validate_backup(payload, today):
     for field,limit in [('ativos',1000),('emprestimos',200),('aportes',5000)]:
         if not isinstance(payload.get(field,[]),list) or len(payload.get(field,[]))>limit:
             raise ValueError('Quantidade de registros fora do limite.')
+    asset_alert_refs=set()
     for a in payload.get('ativos',[]):
         if not isinstance(a,dict):
             raise ValueError('Ativo inválido.')
@@ -63,6 +64,13 @@ def validate_backup(payload, today):
         entry.update({k:numeric(a[k],.000001 if k=='qtd' else 0) for k in ('qtd','pm','atual')})
         if a.get('updated_at'):
             entry['updated_at']=iso(a['updated_at'])
+        if a.get('alertRef'):
+            if not isinstance(a['alertRef'],str) or not re.fullmatch(r'[a-f0-9]{32}',a['alertRef']):
+                raise ValueError('Referência de investimento inválida.')
+            if a['alertRef'] in asset_alert_refs:
+                raise ValueError('Referência duplicada entre investimentos.')
+            asset_alert_refs.add(a['alertRef'])
+            entry['alertRef']=a['alertRef']
         result['ativos'].append(entry)
     ids=set()
     wallet_refs=set()

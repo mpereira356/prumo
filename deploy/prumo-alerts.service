@@ -1,0 +1,19 @@
+[Unit]
+Description=Prumo - processar alertas com preços armazenados
+After=network.target
+
+[Service]
+Type=oneshot
+User=prumo
+Group=prumo
+WorkingDirectory=/opt/prumo
+EnvironmentFile=/etc/prumo/prumo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/prumo/.venv/bin/python -m flask --app app process-price-alerts
+TimeoutStartSec=50
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/prumo

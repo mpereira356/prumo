@@ -1,0 +1,10 @@
+[Unit]
+Description=Prumo - verificar fila de alertas a cada minuto
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+Unit=prumo-alerts.service
+
+[Install]
+WantedBy=timers.target

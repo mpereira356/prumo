@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $projectPython)) {
     python -m venv .venv
     if ($LASTEXITCODE -ne 0) { throw 'Não foi possível criar o ambiente Python.' }
 }
-& $projectPython -c 'import flask, flask_wtf, waitress, tzdata'
+& $projectPython -c 'import flask, flask_wtf, waitress, tzdata, cryptography'
 if ($LASTEXITCODE -ne 0) {
     & $projectPython -m pip --isolated install -r requirements.lock.txt
     if ($LASTEXITCODE -ne 0) { throw 'Não foi possível instalar as dependências.' }
